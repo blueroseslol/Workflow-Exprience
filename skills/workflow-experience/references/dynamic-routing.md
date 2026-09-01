@@ -166,7 +166,7 @@ significant = (a, p) => a > p * 1.5 && (a - p) > 3
 routeMiss = significant(a.symbols, p.symbols) || significant(a.modules, p.modules) || significant(a.processes, p.processes)
 ```
 
-`routeMiss=true` 必须写进 `scanFindings`；HIGH/CRITICAL 出现 routeMiss → 追加 fable Final Audit。
+`routeMiss=true` 必须写进 `scanFindings`；**任意 route 出现 routeMiss 都触发 fable Final Audit**（`needsAudit = CRITICAL || routeMiss`）。LOW 的 routeMiss 反而比 HIGH 更值得审计——它意味着前面的 Recon + Planner 都低估了爆炸范围。
 
 > linked worktree 场景必须显式传 `worktree` 给 detect_changes，否则可能对错 checkout diff，出现假 0 changed symbols。
 

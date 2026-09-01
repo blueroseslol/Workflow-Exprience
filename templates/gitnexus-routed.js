@@ -579,7 +579,11 @@ if (needsReview) {
     { label: 'review:plan', phase: 'Review', model: reviewModel, effort: 'high', schema: REVIEW_SCHEMA }
   )
 
-  if (review?.verdict === 'block') {
+  // fail-closed：该审却审不出结果（agent 未返回）→ 早退，不放行到后续阶段
+  if (!review) {
+    return { status: 'failed', at: 'Review', reason: 'review agent 未返回结构化结果（fail-closed，不进入实现）', plan, routing }
+  }
+  if (review.verdict === 'block') {
     return { status: 'blocked', at: 'Review', blockers: review.blockers, plan, routing }
   }
   // revise 不带病进 Implement：实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的「whitelist 过窄」。
@@ -722,8 +726,12 @@ if (needsAudit) {
 }
 
 // ================= Commit Gate（JS）→ Commit（所有等级统一在此提交） =================
-// 最终 status 必须吸收 audit verdict：audit 非 accept 就不提交。
-const auditBlocks = audit && audit.verdict !== 'accept'
+// 需要审计但 audit 缺失 → fail-closed 早退，绝不提交
+if (needsAudit && !audit) {
+  return { status: 'failed', at: 'Audit', reason: '需要 Final Audit 但 audit agent 未返回结构化结果（fail-closed，不提交）', verify, routing }
+}
+// 最终 status 必须吸收 audit verdict：needsAudit 时必须 audit=accept 才放行
+const auditBlocks = needsAudit && audit.verdict !== 'accept'
 const commitExpected = REQUIRE_COMMIT && verify?.status === 'green' && !auditBlocks
 let commitResult = null
 if (commitExpected) {
