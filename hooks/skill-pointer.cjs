@@ -40,12 +40,15 @@ function main() {
   const skillName = skillRaw.includes(':') ? skillRaw.split(':').pop() : skillRaw
   if (!TARGET_SKILLS.has(skillName)) return
 
-  const templates = path.join(PLUGIN_ROOT, 'templates').replace(/\\/g, '/')
   const skillDir = path.join(PLUGIN_ROOT, 'skills', 'workflow-experience').replace(/\\/g, '/')
+  const templates = path.join(PLUGIN_ROOT, 'templates').replace(/\\/g, '/')
 
+  // 不枚举模板名：每加一个模板都要同步改 hook，是纯维护税。
+  // 只给索引与目录，让 agent 自己按需 Read。
   const pointer =
-    `本机已有 workflow 经验库：可粘贴模板在 ${templates}/（four-phase.js / stage-with-gates.js / readonly-recon.js），` +
-    `约束速查与 effort 门控真相在 ${skillDir}/references/。写脚本前先 Read 相关文件，不要从零编。`
+    `本机已有 workflow 经验库：先 Read ${skillDir}/SKILL.md 的索引，` +
+    `再按需 Read references/ 或 templates/（${templates}/）下的可粘贴模板，不要从零编。` +
+    `本 Skill 是内置 workflow-authoring 的增量经验层；尚未加载 workflow-authoring 时先调用它。`
 
   process.stdout.write(
     JSON.stringify({
