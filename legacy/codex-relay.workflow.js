@@ -16,7 +16,7 @@ export const meta = {
   description: 'codex 线程交接包 → 强制交叉验证 → Ultracode 接力开发（Opus 计划 / fable 审 / Sonnet 实现 / Haiku 验证提交）',
   phases: [
     { title: 'Gate', model: 'haiku' },
-    { title: 'Read', model: 'sonnet' },
+    { title: 'Read', model: 'haiku' },
     { title: 'Plan', model: 'opus' },
     { title: 'Review', model: 'fable' },
     { title: 'Implement', model: 'sonnet' },
@@ -201,7 +201,7 @@ log('闸门通过。自述可信度 = ' + gate.claimsVerdict + '（' + gate.clai
 
 // ================= Read（读码定位中断点） =================
 phase('Read')
-const read = await agent(`你是 sonnet 读码者。只读，不改任何文件。
+const read = await agent(`你是 haiku 读码者。只读，不改任何文件。
 
 交接包机器事实：${BUNDLE}（Read 它，只看 files / userDirectives / lastTurnEmpty / aborts 字段）
 仓库根：${REPO}
@@ -221,7 +221,7 @@ const read = await agent(`你是 sonnet 读码者。只读，不改任何文件�
 ${GIT_SAFETY}
 
 产出 interruptPoint（具体到 file:line）、evidence、openspecDrift、selfCompleteness、notes。`, {
-  model: 'sonnet', effort: 'xhigh', phase: 'Read', label: 'read-interrupt-point', schema: READ_SCHEMA,
+  model: 'haiku', effort: 'max', phase: 'Read', label: 'read-interrupt-point', schema: READ_SCHEMA,
 })
 
 if (!read) return { stopped: 'read-failed', gate }

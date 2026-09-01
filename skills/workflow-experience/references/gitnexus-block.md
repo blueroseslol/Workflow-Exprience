@@ -45,6 +45,20 @@ hook 会在以下情况提醒：
 - 中间编辑状态 → 不跑，等里程碑完成
 - 功能收口 + 测试全绿 → 跑
 
+**另外两条固定触发点（不依赖 hook，无条件执行）**：
+
+**规则 A —— 执行 ultracode 开发任务之前**：先跑一次快速缓存刷新，让索引对齐当前工作区，避免 `query` / `impact` 读到旧索引：
+
+```bash
+gitnexus analyze --skills --verbose --skip-agents-md
+```
+
+**规则 B —— 当需要用户拍板时**：本轮流程最后添加一个 GitNexus 缓存重建任务，用 haiku 跑（带 `--embeddings` 与 `--pdg`，早退后重跑 recon 直接命中新缓存）：
+
+```bash
+gitnexus analyze --embeddings --skills --verbose --skip-agents-md --pdg
+```
+
 命令：
 ```bash
 gitnexus analyze --embeddings --skills --verbose --skip-agents-md
@@ -74,6 +88,10 @@ gitnexus analyze --embeddings --skills --pdg --verbose --skip-agents-md
 | Plan 层的 context / impact 查询 | `opus` | 结论要进计划，需要判断力 |
 | Verify 层的 detect_changes | `haiku` | 机械核对，比对预估与实际 |
 | 独立的 analyze 重跑 | `haiku` | 纯执行 |
+| ultracode 开发前的快速缓存刷新（规则 A） | `haiku` | 机械执行，刷新 FTS 索引 |
+| 拍板时的缓存重建任务（规则 B，含 `--pdg`） | `haiku` | 机械执行，早退重跑直接命中新缓存 |
+
+> **口径注记**：当前 ultracode 流程全部使用 haiku 模型处理，GitNexus 缓存刷新 / 重建任务也用 haiku。
 
 ---
 
