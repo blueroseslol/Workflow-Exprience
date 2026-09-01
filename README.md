@@ -128,12 +128,11 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 
 ---
 
-## 待验证
+## 已验证（2026-09-01 实测）
 
-以下尚未实测，使用前建议先验：
-
-- **E4**：`args` 在脚本里的绑定方式未在本机验证。目前模板里写的是 `args?.advisorModel ?? 'fable'`，若不成立需改成常量。
-- **hook 在真实 Claude Code 会话中的行为**：三个 hook 都用构造的 stdin 实测通过，但尚未在真实会话里跑过一轮完整流程。
+- **args 绑定**：`args` 是 object，`args?.advisorModel ?? 'fable'` 与可选链均生效（probe 实测返回 `advisorModel:"opus", advisorMax:3`）。
+- **脚本前置注释**：被沙箱接受（probe 脚本首行是 `//` 注释仍正常执行）。
+- **三个 hook**：均用构造的 stdin 实测通过（skill-pointer 命中/未命中、harvest 固化 6 run + 幂等 + 递归防护、peer-progress 注入 + 水位推进）。
 
 ---
 
