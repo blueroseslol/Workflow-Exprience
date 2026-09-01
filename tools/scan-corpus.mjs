@@ -66,6 +66,8 @@ for (const f of files) {
       scriptSha1: j.script ? crypto.createHash('sha1').update(j.script).digest('hex').slice(0, 12) : '',
       project: path.basename(path.dirname(path.dirname(path.dirname(f)))),
       file: f,
+      // 动态路由遥测（gitnexus-routed.js 模板把 routing 对象放进 workflow result）
+      routing: (j.result && j.result.routing) ? j.result.routing : null,
     })
   } catch {
     /* 跳过坏文件 */
@@ -118,6 +120,57 @@ if (overLine.length) {
   console.log(`\n⚠️ 越过 25 agent 警告线的 run：${overLine.length} 个`)
   for (const r of overLine.slice(0, 5)) console.log(`   ${r.name} · ${r.agents} agents · ${r.ts}`)
 }
+
+// ---------- 动态路由遥测（gitnexus-routed.js）----------
+const routed = runs.filter(r => r.routing && r.routing.route)
+if (routed.length) {
+  console.log(`\n=== 动态路由遥测（${routed.length} 个带 routing 的 run）===`)
+
+  // route 分布 + route → completed/killed 率
+  const byRoute = {}
+  for (const r of routed) {
+    const k = r.routing.route
+    byRoute[k] = byRoute[k] || { total: 0, completed: 0, killed: 0, failed: 0, routeMiss: 0, scoreSum: 0, forced: 0 }
+    const b = byRoute[k]
+    b.total++
+    if (r.status === 'completed') b.completed++
+    else if (r.status === 'killed') b.killed++
+    else if (r.status === 'failed') b.failed++
+    if (r.routing.routeMiss) b.routeMiss++
+    if (typeof r.routing.score === 'number') b.scoreSum += r.routing.score
+    if (Array.isArray(r.routing.forcedEscalations) && r.routing.forcedEscalations.length) b.forced++
+  }
+  console.log('\n按路由等级：')
+  for (const [route, b] of Object.entries(byRoute)) {
+    const avgScore = b.total ? (b.scoreSum / b.total).toFixed(0) : '?'
+    console.log(
+      `  ${route.padEnd(9)} n=${b.total} · completed ${pct100(b.completed, b.total)} · killed ${pct100(b.killed, b.total)} · failed ${pct100(b.failed, b.total)}` +
+      ` · routeMiss ${pct100(b.routeMiss, b.total)} · 强制升级 ${pct100(b.forced, b.total)} · 平均分 ${avgScore}`
+    )
+  }
+
+  // 模型组合 → completed 率
+  const byCombo = {}
+  for (const r of routed) {
+    const g = r.routing
+    const combo = [g.plannerModel || '-', g.implementationModel || '-', g.reviewModel || 'skip'].join(' / ')
+    byCombo[combo] = byCombo[combo] || { total: 0, completed: 0 }
+    byCombo[combo].total++
+    if (r.status === 'completed') byCombo[combo].completed++
+  }
+  console.log('\n按模型组合（plan / implement / review）→ completed 率：')
+  for (const [combo, b] of Object.entries(byCombo).sort((a, b2) => b2[1].total - a[1].total)) {
+    console.log(`  ${combo.padEnd(28)} n=${b.total} · completed ${pct100(b.completed, b.total)}`)
+  }
+
+  const totalMiss = routed.filter(r => r.routing.routeMiss).length
+  const totalForced = routed.filter(r => Array.isArray(r.routing.forcedEscalations) && r.routing.forcedEscalations.length).length
+  console.log(`\nrouteMiss 率：${pct100(totalMiss, routed.length)}（${totalMiss}/${routed.length}） ← 高估路由的信号，升高说明阈值/打分该调`)
+  console.log(`强制升级率：${pct100(totalForced, routed.length)}（${totalForced}/${routed.length}）`)
+  console.log('提示：用 route→killed 与 routeMiss 率校准 24/49/74 阈值（dynamic-routing.md 第三节）。')
+}
+
+function pct100(a, b) { return b ? ((a / b) * 100).toFixed(0) + '%' : '—' }
 
 // ---------- 最贵的 N 个 ----------
 if (TOP > 0) {
