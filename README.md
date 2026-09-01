@@ -60,10 +60,12 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 │       ├── constraints.md     十类约束句式 + 命中率
 │       ├── gitnexus-block.md  前置/后置检查块
 │       ├── model-effort.md    模型分工 + effort 门控真相 ★
+│       ├── dynamic-routing.md 动态模型路由 + GitNexus 复杂度评分（实验）
 │       ├── resume-and-args.md 缓存键 / resume 限制 / args 门
 │       └── pitfalls.md        十条踩坑记忆
 ├── templates/               可粘贴成品脚本（核心交付物）
-│   ├── four-phase.js          Plan→Review→Preflight→Implement→Verify
+│   ├── four-phase.js          Plan→Review→Preflight→Implement→Verify（默认 baseline）
+│   ├── gitnexus-routed.js     动态路由：Recon→JS评分→派生模型链→对抗Review（实验）
 │   ├── stage-with-gates.js    拍板边界模板（一个决议一个 workflow）
 │   └── readonly-recon.js      只读调研
 ├── hooks/                   三个 hook，全部实测通过

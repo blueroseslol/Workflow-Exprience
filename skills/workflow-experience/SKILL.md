@@ -18,6 +18,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— 可粘贴
 | 约束句式全表（含命中率） | `references/constraints.md` |
 | GitNexus 前置/后置检查块 | `references/gitnexus-block.md` |
 | 模型分工与 effort 门控真相 | `references/model-effort.md` |
+| 动态模型路由与 GitNexus 复杂度评分 | `references/dynamic-routing.md` |
 | resume / args / 缓存键语义 | `references/resume-and-args.md` |
 | 踩坑记忆 | `references/pitfalls.md` |
 | 可粘贴成品脚本 | `../../templates/four-phase.js` 等 |
@@ -59,6 +60,8 @@ export const meta = {
 **effort 真相**：`haiku + max` 是**空操作**（参数根本不发送），`sonnet + xhigh` 在原生 sonnet 上**静默降级为 high**。要表达"验得更严"，用**取证型 schema**（见下），不要用 effort。详见 `references/model-effort.md`。
 
 `model` 不确定时**省略**它——继承会话模型通常就是对的。
+
+**动态路由**（实验）：Recon(haiku) 出证据地图 → JS 纯函数算 ComplexityScore → 路由 LOW/MEDIUM/HIGH/CRITICAL 派生模型链。规则见 `references/dynamic-routing.md`，模板见 `../../templates/gitnexus-routed.js`。`four-phase.js` 仍是默认 baseline。
 
 ## 取证型 VERIFY_SCHEMA（反制假绿的正确姿势）
 
