@@ -94,10 +94,13 @@ const needsReview         = ALWAYS_REVIEW || route !== 'LOW'
 
 | 路由 | Recon | Plan | Review | Implement | Verify | Final Audit |
 |---|---|---|---|---|---|---|
-| **LOW** | haiku | sonnet | （跳过，除非 alwaysReview） | sonnet | haiku | — |
-| **MEDIUM** | haiku | sonnet | fable | sonnet | haiku | — |
-| **HIGH** | haiku | opus | fable | sonnet | haiku | routeMiss 时触发 fable |
-| **CRITICAL** | haiku | opus | fable（对抗） | opus | haiku（机械核对） | fable（必跑） |
+| **LOW** | haiku | sonnet | （跳过，除非 alwaysReview） | sonnet | haiku（只验证） | routeMiss 时触发 fable |
+| **MEDIUM** | haiku | sonnet | fable | sonnet | haiku（只验证） | routeMiss 时触发 fable |
+| **HIGH** | haiku | opus | fable | sonnet | haiku（只验证） | routeMiss 时触发 fable |
+| **CRITICAL** | haiku | opus | fable（对抗） | opus | haiku（只验证） | fable（必跑） |
+
+> 所有等级的 Verify 都只验证、不提交；提交统一由 Commit 层在 Commit Gate 放行后执行（见下节）。
+> Final Audit 触发条件：`route === 'CRITICAL' || routeMiss`——**LOW 的 routeMiss 比 HIGH 更值得审计**，因为它意味着前面的 Recon + Planner 都低估了爆炸范围。
 
 LOW 默认跳过 Sol Review 是**可配置策略**，不是硬编码：
 ```js
@@ -116,7 +119,7 @@ Recon 预判只是第一次估计。完整链路要有**三层纠偏**，且闸�
 第三次：实现后 GitNexus detect_changes 实测 → routeMiss → Final Audit
 ```
 
-修正版执行链（v2）与各级闸门：
+修正版执行链（v3，所有等级统一拆开 Verify/Commit，routeMiss 一律在提交前计算）：
 
 ```
 Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Implement → Verify → routeMiss → Audit → Commit Gate → Commit
@@ -124,14 +127,15 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 
 | 闸门 | 位置 | 行为 |
 |---|---|---|
-| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required`，按「一个决议一个 workflow」开新 workflow，不在当前 run 中途换模型（保 resume/cache 确定性） |
+| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required` 并带 `nextArgs.minRoute=<更高等级>`。新 workflow 用 `minRoute` 给路由兜底，**升级粘滞、不会在 Recon 处回落**（否则 Recon 重判 LOW → Plan 再判 HIGH → 再升级 → 死循环）。不在当前 run 中途换模型（保 resume/cache 确定性） |
 | **Review 门** | Review 后 | `revise` → 早退 `replan-required`（实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的过窄问题）；`block` → `blocked` |
+| **Preflight 门** | Preflight 后 | **fail-closed**：`!pre`（agent 未返回）也算失败 → `failed`；`!pre.ready` → `blocked`。不再静默放行 |
 | **Implement 门** | Implement 后 | `!impl \|\| !impl.done` → 早退 `escalate`，避免「没实现完但旧测试全绿被提交」 |
-| **Commit Gate** | Audit 后 | 仅 `verify green 且 (无 audit 或 audit=accept)` 才放行提交；最终 status 吸收 audit verdict |
+| **Commit Gate** | Audit 后 | 仅 `verify green 且 (无 audit 或 audit=accept) 且 requireCommit` 才放行提交。该提交却没提交成（commitResult.committed=false）→ `status='commit-failed'`，不落 green。最终 status 吸收 audit verdict |
 
-另外两个关键分离：
+两个关键分离：
 
-- **Verify / Commit 分离**：LOW/MEDIUM 由 Verify 直接提交（无 Audit 阶段）；HIGH/CRITICAL 的 Verify 只验证不提交，提交在 Final Audit 通过后由独立 Commit 层完成。这样 Audit 的 `needs-rework` 能真正阻止提交。
+- **Verify / Commit 全程分离**：所有等级的 Verify 都只验证不提交；`routeMiss` 在提交前算，`needsAudit = CRITICAL || routeMiss`。这样即使 LOW/MEDIUM 也能在提交前被 routeMiss 拦住、升级 Sol Audit 再决定提交与否——堵住「先提交后才发现低估」的洞。代价只是 LOW/MEDIUM 多一个很便宜的 haiku Commit agent。
 - **Preflight 必须保留**：动态路由改变的是模型选择，**不是牺牲基线核对**。haiku Preflight 建测试基线，Verify 据此判「回退」，这是反假绿的地基。
 
 > 早退的 `route-escalation-required` / `replan-required` 与 `need-decision` 一样，是把控制权交回主 agent / 用户的既定模式，不是失败。
@@ -144,7 +148,7 @@ Router 出问题时**绝不 fallback 到 LOW**：
 
 | 故障 | 处理 |
 |---|---|
-| Recon 返回 null | 直接 HIGH，Planner 全程自侦察 |
+| Recon 返回 null | 直接 HIGH，Planner 全程自侦察；**不编造 score**——标 `score: null, failsafe: true`（写成 75 会落进 CRITICAL 区间却标 HIGH，污染 scan-corpus 的平均分统计） |
 | GitNexus 不可用 | ≥MEDIUM |
 | 索引严重落后 / impact truncated | uncertainty 加分 + 对应硬升级 |
 | 入口 symbol 无法绑定 | uncertainty.ambiguous → 加分 |

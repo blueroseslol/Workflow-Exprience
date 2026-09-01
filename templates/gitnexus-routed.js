@@ -1,24 +1,27 @@
 // gitnexus-routed.js — GitNexus 驱动的动态模型路由模板（实验性）
 //
-// 架构（修正版控制流，v2）：
+// 架构（修正版控制流，v3：所有等级统一拆开 Verify/Commit，routeMiss 一律在提交前计算）：
 //   Recon(haiku 建证据地图)
-//     → JS 纯函数 computeRouting() 算 ComplexityScore
+//     → JS 纯函数 computeRouting() 算 ComplexityScore（含 minRoute 下限）
 //     → Plan(路由派生模型，亲自重读代码，输出 predictedImpact.risk)
-//     → Plan Risk Gate(JS：Planner 自评风险高于 Recon 路由 → 早退升级新 workflow)
+//     → Plan Risk Gate(JS：Planner 自评风险高于路由 → 早退 route-escalation-required，带 nextArgs.minRoute)
 //     → Review(fable 对抗；revise/block → 早退 replan-required，不带病实现)
-//     → Preflight(haiku 建测试基线)
+//     → Preflight(haiku 建测试基线；fail-closed)
 //     → Implement(路由派生模型；未完成 → 早退 escalate)
-//     → Verify(haiku 验证 + GitNexus 实测；LOW/MEDIUM 直接提交，HIGH/CRITICAL 不提交)
+//     → Verify(haiku 验证 + GitNexus 实测，**绝不提交**)
 //     → routeMiss(JS：预估 vs 实测，三维度)
-//     → Final Audit(fable：CRITICAL 必跑 / HIGH+routeMiss 触发)
+//     → Final Audit(fable：CRITICAL 必跑 / 任意 route 出现 routeMiss 触发)
 //     → Commit Gate(JS：verify 绿 且 audit accept 才放行) → Commit(haiku)
 //
-// 关键修正（对照审阅意见）：
-//   - Audit 可以否决提交：Verify 与 Commit 分离，最终 status 吸收 audit verdict
-//   - Review=revise 不再带病进 Implement，早退 replan-required
-//   - Implement 未完成有 gate，不会「没实现完但测试全绿就被提交」
-//   - 恢复 Preflight 建立测试基线（动态路由改变的是模型选择，不是牺牲基线核对）
-//   - Plan Risk Gate 给 Recon 误判提供第二次纠偏（见 dynamic-routing.md）
+// v3 修正（对照审阅意见）：
+//   - 所有 route 统一 Verify/Commit 分离：routeMiss 在提交前计算，
+//     LOW/MEDIUM 也能在提交前被 routeMiss 拦住并升级 Audit（v2 是 LOW/MEDIUM 先提交后才发现）
+//   - needsAudit = CRITICAL || routeMiss —— LOW 的 routeMiss 比 HIGH 更值得审计
+//   - minRoute：Plan Risk Gate 升级带 nextArgs.minRoute，新 workflow 以此兜底，避免升级-回落死循环
+//   - Preflight fail-closed：agent 未返回(null) 也算失败，不再静默放行
+//   - Commit 失败不落 green：commitExpected 而未成功 → status=commit-failed
+//   - fail-safe 不再编造 score=75（落在 CRITICAL 区间却标 HIGH，污染统计），改为 score=null + failsafe
+//   - Final Audit 强制亲自 git diff / Read 变更 / 复查 caller，不得只摘要转述
 //
 // 定位：与 four-phase.js（稳定 baseline）并存的【实验模板】。
 // 路由依据与阈值见 skills/workflow-experience/references/dynamic-routing.md
@@ -64,8 +67,14 @@ const ROUTE_LOW_MAX = args?.routeLowMax ?? 24
 const ROUTE_MEDIUM_MAX = args?.routeMediumMax ?? 49
 const ROUTE_HIGH_MAX = args?.routeHighMax ?? 74
 
+// 路由下限：上次 Plan Risk Gate 升级后由 nextArgs.minRoute 传入，让升级粘滞（不在 Recon 处回落）
+const MIN_ROUTE = args?.minRoute ?? 'LOW'
+
 // LOW 是否也强制过 Review（默认 false = 跳过省 token；true = 全量过）
 const ALWAYS_REVIEW = args?.alwaysReview ?? false
+
+// 是否要求最终提交（只读调研类可传 false）
+const REQUIRE_COMMIT = args?.requireCommit ?? true
 
 // 用户已拍板（不得当成 blocker 再问）
 const DECIDED = args?.decisions ?? {}
@@ -268,11 +277,11 @@ const IMPLEMENT_SCHEMA = {
   },
 }
 
-// 取证型 + GitNexus 实测爆炸半径（actualImpact）。commits 仅在 LOW/MEDIUM（Verify 直接提交）时非空。
+// 取证型 + GitNexus 实测爆炸半径（actualImpact）。Verify 只验证、不提交（提交统一由 Commit 层负责）。
 const VERIFY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['status', 'vitestTail', 'testTotal', 'testPassed', 'testFailed', 'typecheckSrcExit', 'scanFindings', 'actualImpact', 'commits'],
+  required: ['status', 'vitestTail', 'testTotal', 'testPassed', 'testFailed', 'typecheckSrcExit', 'scanFindings', 'actualImpact'],
   properties: {
     status: { type: 'string', enum: ['green', 'red'] },
     vitestTail: { type: 'string', description: '测试真实尾部输出，原样粘贴' },
@@ -292,7 +301,6 @@ const VERIFY_SCHEMA = {
         processes: S_NUM0,
       },
     },
-    commits: S_STR_ARR,
   },
 }
 
@@ -319,7 +327,7 @@ const AUDIT_SCHEMA = {
   },
 }
 
-// 提交层（HIGH/CRITICAL 在 Audit 通过后才跑）
+// 提交层（所有等级统一由它提交；仅 Commit Gate 放行时执行）
 const COMMIT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -338,12 +346,15 @@ const maxRoute = (a, b) => ROUTE_ORDER[Math.max(ROUTE_ORDER.indexOf(a), ROUTE_OR
 
 function computeRouting(recon) {
   // Fail-safe：Recon 挂了绝不能当 LOW。偏向质量而非便宜 —— 按 HIGH 走，Planner 全程自侦察。
+  // 不编造 score：recon 都失败了就没有真实 ComplexityScore，标 score=null + failsafe，避免污染统计。
   if (!recon) {
+    const route = maxRoute('HIGH', MIN_ROUTE)
     return {
-      score: 75,
-      breakdown: { failsafe: 75 },
-      route: 'HIGH',
-      forcedEscalations: ['recon-null → HIGH (fail-safe)'],
+      score: null,
+      failsafe: true,
+      breakdown: {},
+      route,
+      forcedEscalations: ['recon-null → HIGH (fail-safe)'].concat(route !== 'HIGH' ? [`minRoute=${MIN_ROUTE}`] : []),
       uncertaintyScore: 15,
       reasons: ['Recon agent 未返回结构化结果，按 fail-safe 强制升级，Planner 须自行完成全部侦察'],
     }
@@ -408,6 +419,10 @@ function computeRouting(recon) {
   esc(recon.riskFlags.migration, 'HIGH', 'migration → HIGH')
   esc((recon.uncertainty.partial || recon.uncertainty.truncated) && recon.contracts.publicApi,
     'CRITICAL', 'partial/truncated + publicApi → CRITICAL')
+  // minRoute 下限：上次 Plan Risk Gate 升级的粘滞，不让 Recon 把它拉回低位
+  esc(true, MIN_ROUTE, MIN_ROUTE !== 'LOW' ? `minRoute=${MIN_ROUTE}（上次升级粘滞）` : null)
+  // 清理 null 理由（MIN_ROUTE=LOW 时）
+  for (let i = forcedEscalations.length - 1; i >= 0; i--) if (!forcedEscalations[i]) forcedEscalations.splice(i, 1)
 
   const reasons = [
     `blast=${blastScore} (d1*4+d2*2+d3=${blast})`,
@@ -454,7 +469,7 @@ const recon = await agent(
 
 // ---------- 路由计算（JS，确定性，一次冻结本轮） ----------
 const routing = computeRouting(recon)
-log(`路由：score=${routing.score} → ${routing.route}` + (routing.forcedEscalations.length ? `（强制升级：${routing.forcedEscalations.join('；')}）` : ''))
+log(`路由：score=${routing.score ?? 'failsafe'} → ${routing.route}` + (routing.forcedEscalations.length ? `（强制升级：${routing.forcedEscalations.join('；')}）` : ''))
 
 // 模型链由路由派生
 const plannerModel = (routing.route === 'HIGH' || routing.route === 'CRITICAL') ? MODEL_STRONG : MODEL_DEFAULT
@@ -512,17 +527,19 @@ if (plan.openQuestionsForUser.length) {
   return { status: 'need-decision', milestone: MILESTONE, questions: plan.openQuestionsForUser, plan, routing }
 }
 
-// ---------- Plan Risk Gate（JS）：Recon 误判的第二次纠偏 ----------
+// ---------- Plan Risk Gate（JS）：Recon 误判的第二次纠偏，升级粘滞 ----------
 // Planner 亲自读码后若评估的风险高于 Recon 冻结的路由，不在当前 workflow 中途换模型
-// （会破 resume/cache 确定性），而是早退并交回升级信息，按「一个决议一个 workflow」开新 workflow。
+// （会破 resume/cache 确定性），而是早退并交回 nextArgs.minRoute，按「一个决议一个 workflow」开新 workflow。
+// 新 workflow 带 minRoute=<更高等级> 重跑，Recon 再判 LOW 也会被 minRoute 兜底，不会回落死循环。
 const plannedRank = ROUTE_RANK[plan.predictedImpact?.risk] ?? 0
 if (plannedRank > ROUTE_RANK[routing.route]) {
-  log(`⚠️ Plan Risk Gate：Planner 自评 ${plan.predictedImpact.risk} 高于 Recon 路由 ${routing.route}，早退升级`)
+  log(`⚠️ Plan Risk Gate：Planner 自评 ${plan.predictedImpact.risk} 高于 Recon 路由 ${routing.route}，早退升级（minRoute 粘滞）`)
   return {
     status: 'route-escalation-required',
     from: routing.route,
     to: plan.predictedImpact.risk,
-    reason: 'Planner 亲自读码后评估的风险高于 Recon 预判；请按新等级重开一个 workflow，不要在当前 run 中途切模型',
+    nextArgs: { minRoute: plan.predictedImpact.risk },
+    reason: 'Planner 亲自读码后评估的风险高于 Recon 预判；请带 nextArgs.minRoute 重开一个 workflow，升级即粘滞，不会在 Recon 处回落',
     recon,
     plan,
     routing,
@@ -581,7 +598,7 @@ if (needsReview) {
   log('路由 LOW 且 alwaysReview=false，跳过 Review（可在 args 传 alwaysReview:true 强制开启）')
 }
 
-// ================= Preflight：haiku 建测试基线 =================
+// ================= Preflight：haiku 建测试基线（fail-closed） =================
 phase('Preflight')
 const pre = await agent(
   [
@@ -594,7 +611,9 @@ const pre = await agent(
   { label: 'preflight', phase: 'Preflight', model: MODEL_VERIFY, schema: PREFLIGHT_SCHEMA }
 )
 
-if (pre && !pre.ready) return { status: 'blocked', at: 'Preflight', blockers: pre.blockers, routing }
+// fail-closed：agent 未返回也算失败，不放行（故障偏向质量）
+if (!pre) return { status: 'failed', at: 'Preflight', reason: 'preflight agent 未返回', routing }
+if (!pre.ready) return { status: 'blocked', at: 'Preflight', blockers: pre.blockers, routing }
 
 // ================= Implement =================
 phase('Implement')
@@ -627,34 +646,29 @@ if (!impl || !impl.done) {
   }
 }
 
-// ================= Verify：haiku 机械核对 + GitNexus 实测爆炸半径 =================
-// LOW/MEDIUM：Verify 直接提交（无 Audit 阶段）。HIGH/CRITICAL：Verify 只验证不提交，提交留给 Audit 之后。
+// ================= Verify：haiku 机械核对 + GitNexus 实测爆炸半径（只验证，不提交） =================
 phase('Verify')
-const verifyPrompt = [
-  '你是独立验证层。不要相信上一层的自述，自己跑一遍。',
-  `测试命令：${plan.testCommands.join(' && ')}`,
-  pre ? `Preflight 基线：${pre.baseline.testPassed}/${pre.baseline.testTotal} 通过，typecheck exit=${pre.baseline.typecheckExit}` : '（无基线）',
-  '低于基线视为回退，status 填 red。',
-  '',
-  '## GitNexus 实测爆炸半径（填 actualImpact）',
-  `跑 detect_changes(scope=all, repo="${GNX}", worktree="${WORKTREE}")，统计实际影响的符号数 / 模块数 / 流程数；`,
-  '对改动过的公共 symbol 重跑 context/impact。',
-  '把【真实】数字填进 actualImpact，不要照抄预估。',
-  '',
-  isHighRisk
-    ? `本任务是 ${routing.route}：只验证，**不要 commit**（提交在 Final Audit 通过后由提交层完成）。`
-    : `全绿后提交：${K_GIT_SAFE}，commit message 引用 ${MILESTONE}，把 commit hash 填进 commits。`,
-  '没有测试输出或退出码作证据，不得勾选任何 checkbox。',
-  K_FAIL_LOUD,
-].join('\n')
-
 const verify = await agent(
-  verifyPrompt,
+  [
+    '你是独立验证层。不要相信上一层的自述，自己跑一遍。**只验证，绝不 commit**（提交统一由后续 Commit 层负责）。',
+    `测试命令：${plan.testCommands.join(' && ')}`,
+    pre ? `Preflight 基线：${pre.baseline.testPassed}/${pre.baseline.testTotal} 通过，typecheck exit=${pre.baseline.typecheckExit}` : '（无基线）',
+    '低于基线视为回退，status 填 red。',
+    '',
+    '## GitNexus 实测爆炸半径（填 actualImpact）',
+    `跑 detect_changes(scope=all, repo="${GNX}", worktree="${WORKTREE}")，统计实际影响的符号数 / 模块数 / 流程数；`,
+    '对改动过的公共 symbol 重跑 context/impact。',
+    '把【真实】数字填进 actualImpact，不要照抄预估。',
+    '',
+    '没有测试输出或退出码作证据，不得勾选任何 checkbox。',
+    K_FAIL_LOUD,
+  ].join('\n'),
   { label: 'verify', phase: 'Verify', model: MODEL_VERIFY, schema: VERIFY_SCHEMA }
 )
 
-// ---------- routeMiss：JS 对比预估 vs 实测（三维度，确定性） ----------
-// 任一维度「实测明显超预估」（超 50% 且绝对值超 3）即 routeMiss。
+// ---------- routeMiss：JS 对比预估 vs 实测（三维度，确定性，提交前计算） ----------
+// 任一维度「实测明显超预估」（超 50% 且绝对值超 3）即 routeMiss。对所有等级生效——
+// 这必须在 Commit 之前算，否则 LOW/MEDIUM 会先提交后才发现低估。
 const significant = (actual, predicted) => actual > predicted * 1.5 && (actual - predicted) > 3
 let routeMiss = false
 let blastRadiusDelta = null
@@ -676,8 +690,9 @@ if (plan?.predictedImpact && verify?.actualImpact) {
   }
 }
 
-// ================= Final Audit：CRITICAL 必跑；HIGH + routeMiss 触发 =================
-const needsAudit = routing.route === 'CRITICAL' || (routeMiss && isHighRisk)
+// ================= Final Audit：CRITICAL 必跑；任意 route 出现 routeMiss 即触发 =================
+// LOW 的 routeMiss 反而比 HIGH 更值得审计——它意味着前面的 Recon+Planner 都低估了爆炸范围。
+const needsAudit = routing.route === 'CRITICAL' || routeMiss
 let audit = null
 if (needsAudit) {
   phase('Audit')
@@ -691,43 +706,50 @@ if (needsAudit) {
       `验证结果：status=${verify?.status ?? '?'}，${verify?.testPassed ?? '?'}/${verify?.testTotal ?? '?'} 通过`,
       verify?.scanFindings?.length ? `scanFindings：\n${verify.scanFindings.map(s => `- ${s}`).join('\n')}` : '',
       '',
-      '重点审计：routeMiss 暴露的低估、未验证假设、跨模块副作用、回滚完整性。每条 finding 给 evidence。',
+      '## 你必须亲自复核，不得只凭上面各层自述就 accept：',
+      `1. 在 ${WORKTREE} 跑 git diff，查看本次实际变更；`,
+      '2. Read 所有 changed files 的关键修改区；',
+      '3. 对公共接口/关键 symbol 重新检查 caller；',
+      `4. routeMiss 时，对受影响 symbol 重跑 GitNexus impact/context（repo=${GNX}, worktree=${WORKTREE}）；`,
+      '5. 每条 finding 必须引用实际 file:line / diff / GitNexus evidence。',
+      '未完成上述检查不得 verdict=accept。',
+      '',
+      '重点审计：routeMiss 暴露的低估、未验证假设、跨模块副作用、回滚完整性。',
       'verdict=accept / needs-rework / escalate-to-human。非 accept 将阻止提交。',
     ].filter(Boolean).join('\n'),
     { label: 'final-audit', phase: 'Audit', model: reviewModel, effort: 'high', schema: AUDIT_SCHEMA }
   )
 }
 
-// ================= Commit Gate（JS）→ Commit（仅 HIGH/CRITICAL；LOW/MEDIUM 已在 Verify 提交） =================
+// ================= Commit Gate（JS）→ Commit（所有等级统一在此提交） =================
 // 最终 status 必须吸收 audit verdict：audit 非 accept 就不提交。
 const auditBlocks = audit && audit.verdict !== 'accept'
+const commitExpected = REQUIRE_COMMIT && verify?.status === 'green' && !auditBlocks
 let commitResult = null
-if (isHighRisk) {
-  const canCommit = verify?.status === 'green' && !auditBlocks
-  if (canCommit) {
-    phase('Commit')
-    commitResult = await agent(
-      [
-        '你是提交层。验证已全绿、审计已通过，现在提交。',
-        `${K_GIT_SAFE}`,
-        `commit message 引用 ${MILESTONE}。只提交本次切片，不 push。`,
-        '把 commit hash 填进 commits，committed 置 true。',
-        K_FAIL_LOUD,
-      ].join('\n'),
-      { label: 'commit', phase: 'Commit', model: MODEL_VERIFY, schema: COMMIT_SCHEMA }
-    )
-  } else {
-    log(`Commit Gate 拦截：verify=${verify?.status ?? '?'}，audit=${audit?.verdict ?? '（无）'} → 不提交`)
-  }
+if (commitExpected) {
+  phase('Commit')
+  commitResult = await agent(
+    [
+      '你是提交层。验证已全绿、审计已通过，现在提交。',
+      `${K_GIT_SAFE}`,
+      `commit message 引用 ${MILESTONE}。只提交本次切片，不 push。`,
+      '把 commit hash 填进 commits，committed 置 true。',
+      K_FAIL_LOUD,
+    ].join('\n'),
+    { label: 'commit', phase: 'Commit', model: MODEL_VERIFY, schema: COMMIT_SCHEMA }
+  )
+} else if (REQUIRE_COMMIT) {
+  log(`Commit Gate 拦截：verify=${verify?.status ?? '?'}，audit=${audit?.verdict ?? '（无）'} → 不提交`)
 }
+const commitSucceeded = commitResult?.committed === true && (commitResult?.commits?.length ?? 0) > 0
 
-// 汇总 commits：LOW/MEDIUM 来自 verify，HIGH/CRITICAL 来自 commitResult
-const commits = isHighRisk ? (commitResult?.commits ?? []) : (verify?.commits ?? [])
+const commits = commitResult?.commits ?? []
 
-// 最终 status：audit 否决优先，其次 verify
+// 最终 status：audit 否决优先；该提交却没提交成 → commit-failed；否则 verify
 const finalStatus =
   audit?.verdict === 'needs-rework' ? 'needs-rework'
     : audit?.verdict === 'escalate-to-human' ? 'escalate-to-human'
+    : (commitExpected && !commitSucceeded) ? 'commit-failed'
     : (verify?.status ?? 'unknown')
 
 // ================= 返回（含路由遥测，进入 harvest 固化的 result） =================
@@ -746,7 +768,9 @@ return {
   // 路由遥测：进 workflow result，由 harvest-workflow 固化进 docs/ultracode/raw，scan-corpus 聚合
   routing: {
     score: routing.score,
+    failsafe: routing.failsafe ?? false,
     route: routing.route,
+    minRoute: MIN_ROUTE,
     plannerModel,
     implementationModel,
     reviewModel: needsReview ? reviewModel : null,
@@ -759,5 +783,5 @@ return {
     blastRadiusDelta,
     routeMiss,
   },
-  broadcast: `[${MILESTONE}] route=${routing.route} score=${routing.score} · ${finalStatus} · ${verify?.testPassed ?? '?'}/${verify?.testTotal ?? '?'} 测试 · ${commits.length} 提交` + (routeMiss ? ' · ⚠️routeMiss' : ''),
+  broadcast: `[${MILESTONE}] route=${routing.route} score=${routing.score ?? 'failsafe'} · ${finalStatus} · ${verify?.testPassed ?? '?'}/${verify?.testTotal ?? '?'} 测试 · ${commits.length} 提交` + (routeMiss ? ' · ⚠️routeMiss' : ''),
 }
