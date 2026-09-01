@@ -45,10 +45,11 @@ function main() {
 
   // 不枚举模板名：每加一个模板都要同步改 hook，是纯维护税。
   // 只给索引与目录，让 agent 自己按需 Read。
+  // 注：本 hook 只在命中 workflow-authoring 时触发，反向依赖由 workflow-experience/SKILL.md 负责，
+  //     这里不再重复「先调用 workflow-authoring」（会造成循环提示）。
   const pointer =
     `本机已有 workflow 经验库：先 Read ${skillDir}/SKILL.md 的索引，` +
-    `再按需 Read references/ 或 templates/（${templates}/）下的可粘贴模板，不要从零编。` +
-    `本 Skill 是内置 workflow-authoring 的增量经验层；尚未加载 workflow-authoring 时先调用它。`
+    `再按需 Read references/ 或 templates/（${templates}/）下的可粘贴模板，不要从零编。`
 
   process.stdout.write(
     JSON.stringify({
