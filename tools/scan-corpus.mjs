@@ -165,7 +165,7 @@ if (routed.length) {
 
   const totalMiss = routed.filter(r => r.routing.routeMiss).length
   const totalForced = routed.filter(r => Array.isArray(r.routing.forcedEscalations) && r.routing.forcedEscalations.length).length
-  console.log(`\nrouteMiss 率：${pct100(totalMiss, routed.length)}（${totalMiss}/${routed.length}） ← 高估路由的信号，升高说明阈值/打分该调`)
+  console.log(`\nrouteMiss 率：${pct100(totalMiss, routed.length)}（${totalMiss}/${routed.length}） ← 低估爆炸范围/风险的信号，升高说明阈值/打分该收紧`)
   console.log(`强制升级率：${pct100(totalForced, routed.length)}（${totalForced}/${routed.length}）`)
   console.log('提示：用 route→killed 与 routeMiss 率校准 24/49/74 阈值（dynamic-routing.md 第三节）。')
 }

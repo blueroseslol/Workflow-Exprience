@@ -106,6 +106,38 @@ const ALWAYS_REVIEW = args?.alwaysReview ?? false   // true → LOW 也过 Revie
 
 ---
 
+## 五·补、控制流闸门（纯 JS，不进 agent）
+
+Recon 预判只是第一次估计。完整链路要有**三层纠偏**，且闸门都是 JS 纯函数（不耗 token、不进缓存键）：
+
+```
+第一次：DeepSeek Recon + GitNexus 预判 → computeRouting() 冻结 route
+第二次：Kimi/Opus Planner 亲自读码纠偏 → Plan Risk Gate
+第三次：实现后 GitNexus detect_changes 实测 → routeMiss → Final Audit
+```
+
+修正版执行链（v2）与各级闸门：
+
+```
+Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Implement → Verify → routeMiss → Audit → Commit Gate → Commit
+```
+
+| 闸门 | 位置 | 行为 |
+|---|---|---|
+| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required`，按「一个决议一个 workflow」开新 workflow，不在当前 run 中途换模型（保 resume/cache 确定性） |
+| **Review 门** | Review 后 | `revise` → 早退 `replan-required`（实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的过窄问题）；`block` → `blocked` |
+| **Implement 门** | Implement 后 | `!impl \|\| !impl.done` → 早退 `escalate`，避免「没实现完但旧测试全绿被提交」 |
+| **Commit Gate** | Audit 后 | 仅 `verify green 且 (无 audit 或 audit=accept)` 才放行提交；最终 status 吸收 audit verdict |
+
+另外两个关键分离：
+
+- **Verify / Commit 分离**：LOW/MEDIUM 由 Verify 直接提交（无 Audit 阶段）；HIGH/CRITICAL 的 Verify 只验证不提交，提交在 Final Audit 通过后由独立 Commit 层完成。这样 Audit 的 `needs-rework` 能真正阻止提交。
+- **Preflight 必须保留**：动态路由改变的是模型选择，**不是牺牲基线核对**。haiku Preflight 建测试基线，Verify 据此判「回退」，这是反假绿的地基。
+
+> 早退的 `route-escalation-required` / `replan-required` 与 `need-decision` 一样，是把控制权交回主 agent / 用户的既定模式，不是失败。
+
+---
+
 ## 六、Fail-safe：故障偏向质量
 
 Router 出问题时**绝不 fallback 到 LOW**：
@@ -123,14 +155,16 @@ Router 出问题时**绝不 fallback 到 LOW**：
 
 ## 七、GitNexus 预估 vs 实测 + routeMiss（遥测）
 
-Plan 阶段必须填 `predictedImpact`（affectedSymbols / affectedModules / processes / risk）。Verify 阶段用 `detect_changes(scope=all)` + `context/impact` 实测填 `actualImpact`。JS 对比：
+Plan 阶段必须填 `predictedImpact`（affectedSymbols / affectedModules / processes / risk）。Verify 阶段用 `detect_changes(scope=all, repo, worktree)` + `context/impact` 实测填 `actualImpact`。JS 对**三个维度**分别对比，任一显著超预估（>50% 且绝对值 >3）即 routeMiss：
 
 ```js
-blastRadiusDelta = actual.affectedSymbols - predicted.affectedSymbols
-routeMiss = blastRadiusDelta > 3 && actual.affectedSymbols > predicted.affectedSymbols * 1.5
+significant = (a, p) => a > p * 1.5 && (a - p) > 3
+routeMiss = significant(a.symbols, p.symbols) || significant(a.modules, p.modules) || significant(a.processes, p.processes)
 ```
 
 `routeMiss=true` 必须写进 `scanFindings`；HIGH/CRITICAL 出现 routeMiss → 追加 fable Final Audit。
+
+> linked worktree 场景必须显式传 `worktree` 给 detect_changes，否则可能对错 checkout diff，出现假 0 changed symbols。
 
 ### 遥测字段（进 workflow result，由 harvest 固化）
 

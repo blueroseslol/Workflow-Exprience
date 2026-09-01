@@ -1,36 +1,52 @@
 // gitnexus-routed.js — GitNexus 驱动的动态模型路由模板（实验性）
 //
-// 架构：
-//   Recon(haiku 建 Repo Evidence Map)
-//     → JS 纯函数计算 ComplexityScore（LLM 不参与评分）
-//     → 路由 LOW / MEDIUM / HIGH / CRITICAL
-//     → 派生模型链 → (可选)对抗 Review → Implement → Verify(GitNexus 预估vs实测)
-//     → routeMiss / CRITICAL 触发 Sol Final Audit
+// 架构（修正版控制流，v2）：
+//   Recon(haiku 建证据地图)
+//     → JS 纯函数 computeRouting() 算 ComplexityScore
+//     → Plan(路由派生模型，亲自重读代码，输出 predictedImpact.risk)
+//     → Plan Risk Gate(JS：Planner 自评风险高于 Recon 路由 → 早退升级新 workflow)
+//     → Review(fable 对抗；revise/block → 早退 replan-required，不带病实现)
+//     → Preflight(haiku 建测试基线)
+//     → Implement(路由派生模型；未完成 → 早退 escalate)
+//     → Verify(haiku 验证 + GitNexus 实测；LOW/MEDIUM 直接提交，HIGH/CRITICAL 不提交)
+//     → routeMiss(JS：预估 vs 实测，三维度)
+//     → Final Audit(fable：CRITICAL 必跑 / HIGH+routeMiss 触发)
+//     → Commit Gate(JS：verify 绿 且 audit accept 才放行) → Commit(haiku)
+//
+// 关键修正（对照审阅意见）：
+//   - Audit 可以否决提交：Verify 与 Commit 分离，最终 status 吸收 audit verdict
+//   - Review=revise 不再带病进 Implement，早退 replan-required
+//   - Implement 未完成有 gate，不会「没实现完但测试全绿就被提交」
+//   - 恢复 Preflight 建立测试基线（动态路由改变的是模型选择，不是牺牲基线核对）
+//   - Plan Risk Gate 给 Recon 误判提供第二次纠偏（见 dynamic-routing.md）
 //
 // 定位：与 four-phase.js（稳定 baseline）并存的【实验模板】。
-// 用 corpus 数据证明它降低 killed / failed / 返工之前，不替换默认模板。
-// 路由依据、阈值含义、遥测字段见 skills/workflow-experience/references/dynamic-routing.md
+// 路由依据与阈值见 skills/workflow-experience/references/dynamic-routing.md
 //
 // 用法：复制本文件，替换 CONFIG 段 <占位>，通过 Workflow({script}) 或 scriptPath 运行。
-// 沙箱禁 import/require、禁 Date.now()/Math.random() —— 本模板的路由计算是纯函数，resume-safe。
+// 沙箱禁 import/require、禁 Date.now()/Math.random() —— 本模板路由计算是纯函数，resume-safe。
 
 export const meta = {
   name: '<kebab-case-name>',
   description: '<一句话，会显示在权限对话框>；GitNexus 动态路由',
   phases: [
     { title: 'Recon', model: 'haiku' },
-    // Plan / Review / Implement / Audit 的模型由路由在运行时派生，meta 是纯字面量无法声明，故不写 model
+    // Plan / Review / Implement / Audit 的模型由路由运行时派生，meta 是纯字面量无法声明，故不写 model
     { title: 'Plan' },
     { title: 'Review' },
+    { title: 'Preflight', model: 'haiku' },
     { title: 'Implement' },
     { title: 'Verify', model: 'haiku' },
     { title: 'Audit' },
+    { title: 'Commit', model: 'haiku' },
   ],
 }
 
 // ---------- CONFIG（改这里） ----------
 const REPO = args?.repo ?? '<D:/path/to/repo>'
 const GNX = args?.gitnexusRepo ?? '<indexed-repo-name>'   // list_repos 里的准确名，目录名 ≠ repo 名
+// linked worktree 时必须显式传 worktree，否则 GitNexus detect_changes 可能对错 checkout diff，出现假 0 changed
+const WORKTREE = args?.worktree ?? REPO
 const TASK = args?.task ?? '<任务描述：要做什么、为什么>'
 const TASKS_DOC = args?.tasksDoc ?? ''                    // openspec tasks.md 路径，无则空
 const MILESTONE = args?.milestone ?? '<x.y>'
@@ -56,6 +72,7 @@ const DECIDED = args?.decisions ?? {}
 
 // ---------- 复用常量 ----------
 const S_STR_ARR = { type: 'array', items: { type: 'string' } }
+const S_NUM0 = { type: 'number', minimum: 0 }   // 计数一律非负，防止负数污染 ComplexityScore
 const K_FILE_LINE = '每条结论必须引用你亲自 Read 到的 file:line，禁止凭摘要、记忆或 Recon 转述。'
 const K_GIT_SAFE = '禁止 git add . 与 git add -A，逐文件 add；feat 与 docs 分两笔提交；不 push。'
 const K_FAIL_LOUD = '如实报告。测试失败就写失败并附原始输出，不得伪造成功、不得吞掉错误。'
@@ -89,19 +106,19 @@ const RECON_SCHEMA = {
       additionalProperties: false,
       required: ['depth1', 'depth2', 'depth3', 'affectedSymbols'],
       properties: {
-        depth1: { type: 'number' },
-        depth2: { type: 'number' },
-        depth3: { type: 'number' },
-        affectedSymbols: { type: 'number' },
+        depth1: S_NUM0,
+        depth2: S_NUM0,
+        depth3: S_NUM0,
+        affectedSymbols: S_NUM0,
       },
     },
-    executionFlows: { type: 'number', description: '入口 symbol 参与的 execution flow / process 数' },
+    executionFlows: { ...S_NUM0, description: '入口 symbol 参与的 execution flow / process 数（unique）' },
     modules: {
       type: 'object',
       additionalProperties: false,
       required: ['count', 'crossModule', 'crossRepo'],
       properties: {
-        count: { type: 'number', description: '预计触碰的文件数' },
+        count: { ...S_NUM0, description: '预计触碰的文件数' },
         crossModule: { type: 'boolean' },
         crossRepo: { type: 'boolean' },
       },
@@ -113,8 +130,8 @@ const RECON_SCHEMA = {
       properties: {
         publicApi: { type: 'boolean' },
         schemaChange: { type: 'boolean' },
-        consumerCount: { type: 'number' },
-        shapeMismatchCount: { type: 'number', description: 'shape_check 报告的 mismatch 数' },
+        consumerCount: S_NUM0,
+        shapeMismatchCount: { ...S_NUM0, description: 'shape_check 报告的 mismatch 数' },
       },
     },
     riskFlags: {
@@ -170,15 +187,15 @@ const PLAN_SCHEMA = {
     whitelist: S_STR_ARR,
     mustNotTouch: S_STR_ARR,
     testCommands: S_STR_ARR,
-    // 预估爆炸半径：Verify 阶段拿它与 detect_changes 实测对比，算 routeMiss
+    // 预估爆炸半径 + Planner 亲自读码后的风险自评；risk 供 Plan Risk Gate 与 Recon 路由二次纠偏
     predictedImpact: {
       type: 'object',
       additionalProperties: false,
       required: ['affectedSymbols', 'affectedModules', 'processes', 'risk'],
       properties: {
-        affectedSymbols: { type: 'number' },
-        affectedModules: { type: 'number' },
-        processes: { type: 'number' },
+        affectedSymbols: S_NUM0,
+        affectedModules: S_NUM0,
+        processes: S_NUM0,
         risk: { type: 'string', enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] },
       },
     },
@@ -210,6 +227,27 @@ const REVIEW_SCHEMA = {
   },
 }
 
+const PREFLIGHT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['ready', 'baseline', 'blockers'],
+  properties: {
+    ready: { type: 'boolean' },
+    baseline: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['testTotal', 'testPassed', 'testFailed', 'typecheckExit'],
+      properties: {
+        testTotal: S_NUM0,
+        testPassed: S_NUM0,
+        testFailed: S_NUM0,
+        typecheckExit: { type: 'number' },
+      },
+    },
+    blockers: S_STR_ARR,
+  },
+}
+
 const IMPLEMENT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -230,7 +268,7 @@ const IMPLEMENT_SCHEMA = {
   },
 }
 
-// 取证型 + GitNexus 实测爆炸半径（actualImpact）
+// 取证型 + GitNexus 实测爆炸半径（actualImpact）。commits 仅在 LOW/MEDIUM（Verify 直接提交）时非空。
 const VERIFY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -238,9 +276,9 @@ const VERIFY_SCHEMA = {
   properties: {
     status: { type: 'string', enum: ['green', 'red'] },
     vitestTail: { type: 'string', description: '测试真实尾部输出，原样粘贴' },
-    testTotal: { type: 'number' },
-    testPassed: { type: 'number' },
-    testFailed: { type: 'number' },
+    testTotal: S_NUM0,
+    testPassed: S_NUM0,
+    testFailed: S_NUM0,
     typecheckSrcExit: { type: 'number' },
     scanFindings: S_STR_ARR,
     // 实现完成后用 GitNexus detect_changes / impact 实测的爆炸半径
@@ -249,9 +287,9 @@ const VERIFY_SCHEMA = {
       additionalProperties: false,
       required: ['affectedSymbols', 'affectedModules', 'processes'],
       properties: {
-        affectedSymbols: { type: 'number', description: 'detect_changes 实际影响的符号数' },
-        affectedModules: { type: 'number' },
-        processes: { type: 'number' },
+        affectedSymbols: { ...S_NUM0, description: 'detect_changes 实际影响的符号数' },
+        affectedModules: S_NUM0,
+        processes: S_NUM0,
       },
     },
     commits: S_STR_ARR,
@@ -281,8 +319,21 @@ const AUDIT_SCHEMA = {
   },
 }
 
+// 提交层（HIGH/CRITICAL 在 Audit 通过后才跑）
+const COMMIT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['committed', 'commits', 'note'],
+  properties: {
+    committed: { type: 'boolean' },
+    commits: S_STR_ARR,
+    note: { type: 'string' },
+  },
+}
+
 // ---------- 路由：纯 JS 确定性计算（不进 agent、不耗 token、resume-safe） ----------
 const ROUTE_ORDER = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+const ROUTE_RANK = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 }
 const maxRoute = (a, b) => ROUTE_ORDER[Math.max(ROUTE_ORDER.indexOf(a), ROUTE_ORDER.indexOf(b))]
 
 function computeRouting(recon) {
@@ -382,9 +433,10 @@ const recon = await agent(
     '## 必须执行的 GitNexus 侦察（按序）',
     `1. list_repos 确认 repo 名（目录名 ≠ repo 名），绑定到「${GNX}」。`,
     '2. 检查索引时间戳：落后于工作区就把 uncertainty.indexStale 置 true。',
-    '3. query 找相关 execution flows，统计数量填 executionFlows。',
+    '3. query 找相关 execution flows，统计 unique 数量填 executionFlows。',
     '4. 对主要入口 symbol 跑 context，拿调用面，填 entrySymbols。',
     '5. 对预计修改的公共 symbol 跑 impact(direction=upstream, maxDepth=3)，把 depth1/depth2/depth3/affectedSymbols 填进 impact。',
+    '   同一 symbol 只计一次，按最近的 depth 归类；多入口的计数要去重，不得重复累加。',
     '6. 涉及 API 修改跑 api_impact；涉及 response/schema 修改跑 shape_check，把 consumerCount / shapeMismatchCount 填进 contracts。',
     '7. 必要时读取 processes。',
     '',
@@ -409,6 +461,7 @@ const plannerModel = (routing.route === 'HIGH' || routing.route === 'CRITICAL') 
 const implementationModel = routing.route === 'CRITICAL' ? MODEL_STRONG : MODEL_DEFAULT
 const reviewModel = MODEL_REVIEW
 const needsReview = ALWAYS_REVIEW || routing.route !== 'LOW'
+const isHighRisk = routing.route === 'HIGH' || routing.route === 'CRITICAL'
 
 // ================= Plan：强模型重读关键代码（Recon 是导航器，不是事实代理） =================
 phase('Plan')
@@ -428,7 +481,7 @@ const reconDigest = recon
 
 const plan = await agent(
   [
-    `你是 ${MILESTONE} 的规划者（路由等级 ${routing.route}）。只规划，不改代码，不 commit。`,
+    `你是 ${MILESTONE} 的规划者（Recon 路由等级 ${routing.route}）。只规划，不改代码，不 commit。`,
     '',
     `任务：${TASK}`,
     `仓库根：${REPO}`,
@@ -441,8 +494,9 @@ const plan = await agent(
     K_FILE_LINE,
     '不得写「根据 Recon 的描述……」作为唯一证据。你的最终结论必须引用【你亲自 Read 到】的 file:line。',
     '',
-    '## 预估爆炸半径（填 predictedImpact，供 Verify 对比实测）',
-    '基于你的阅读，预估本次改动会影响的 affectedSymbols / affectedModules / processes 数量与你的风险评级 risk。',
+    '## 预估爆炸半径 + 风险自评（填 predictedImpact）',
+    '基于你的阅读，预估本次改动会影响的 affectedSymbols / affectedModules / processes，并给出你亲自读码后的风险评级 risk。',
+    '**如果你读码后认为实际风险高于 Recon 给的路由等级，如实填更高的 risk —— 这会触发 Plan Risk Gate 升级，不会被忽略。**',
     '',
     '用户已拍板（不得回问）：',
     ...Object.entries(DECIDED).map(([k, v]) => `- ${k}：${JSON.stringify(v)}`),
@@ -456,6 +510,23 @@ if (!plan) return { status: 'failed', at: 'Plan', routing }
 if (plan.verdict === 'blocked') return { status: 'blocked', reason: plan.rootCause, questions: plan.openQuestionsForUser, routing }
 if (plan.openQuestionsForUser.length) {
   return { status: 'need-decision', milestone: MILESTONE, questions: plan.openQuestionsForUser, plan, routing }
+}
+
+// ---------- Plan Risk Gate（JS）：Recon 误判的第二次纠偏 ----------
+// Planner 亲自读码后若评估的风险高于 Recon 冻结的路由，不在当前 workflow 中途换模型
+// （会破 resume/cache 确定性），而是早退并交回升级信息，按「一个决议一个 workflow」开新 workflow。
+const plannedRank = ROUTE_RANK[plan.predictedImpact?.risk] ?? 0
+if (plannedRank > ROUTE_RANK[routing.route]) {
+  log(`⚠️ Plan Risk Gate：Planner 自评 ${plan.predictedImpact.risk} 高于 Recon 路由 ${routing.route}，早退升级`)
+  return {
+    status: 'route-escalation-required',
+    from: routing.route,
+    to: plan.predictedImpact.risk,
+    reason: 'Planner 亲自读码后评估的风险高于 Recon 预判；请按新等级重开一个 workflow，不要在当前 run 中途切模型',
+    recon,
+    plan,
+    routing,
+  }
 }
 
 const planDigest = [
@@ -494,10 +565,36 @@ if (needsReview) {
   if (review?.verdict === 'block') {
     return { status: 'blocked', at: 'Review', blockers: review.blockers, plan, routing }
   }
-  if (review?.verdict === 'revise') log('Review=revise：实现阶段必须吸收 blockers/concerns')
+  // revise 不带病进 Implement：实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的「whitelist 过窄」。
+  // 早退交回意见，让规划层（或用户）修订计划后再跑。
+  if (review?.verdict === 'revise') {
+    log('Review=revise：早退 replan-required，不进入实现')
+    return {
+      status: 'replan-required',
+      milestone: MILESTONE,
+      reviewFeedback: review.blockers.map(b => `${b.issue}（${b.evidence}）`).concat(review.concerns),
+      plan,
+      routing,
+    }
+  }
 } else {
   log('路由 LOW 且 alwaysReview=false，跳过 Review（可在 args 传 alwaysReview:true 强制开启）')
 }
+
+// ================= Preflight：haiku 建测试基线 =================
+phase('Preflight')
+const pre = await agent(
+  [
+    '你是环境与基线层。装依赖、建目录、跑一次基线测试，不改业务代码。',
+    `基线命令：${plan.testCommands.join(' && ')}`,
+    '把真实的测试数字与 typecheck 退出码填进 baseline。',
+    '如实报告 —— 基线本来就红就写红，不要试图修好它（那是 Implement 层的事）。',
+    K_FAIL_LOUD,
+  ].join('\n'),
+  { label: 'preflight', phase: 'Preflight', model: MODEL_VERIFY, schema: PREFLIGHT_SCHEMA }
+)
+
+if (pre && !pre.ready) return { status: 'blocked', at: 'Preflight', blockers: pre.blockers, routing }
 
 // ================= Implement =================
 phase('Implement')
@@ -506,54 +603,81 @@ const impl = await agent(
     '你是实现层。按计划逐切片实现。',
     '',
     planDigest,
-    review && review.verdict === 'revise' ? `Review 要求吸收：\n${review.blockers.map(b => `- ${b.issue}（${b.evidence}）`).join('\n')}\n${review.concerns.join('\n')}` : '',
     '',
     '硬规则：',
     '- 只允许修改 whitelist 内的文件；mustNotTouch 内的一律不动。越界即失败。',
     '- 改前先 Read 目标文件确认现状，改后再 Read 一次确认落盘符合预期。',
-    '- 不要 commit、不要 push（Verify 层负责）。',
+    '- 不要 commit、不要 push（提交层负责）。',
     '- 计划里有而你没做的，必须写进 notImplemented，不许假装做了。',
     K_FAIL_LOUD,
-  ].filter(Boolean).join('\n'),
+  ].join('\n'),
   { label: 'implement', phase: 'Implement', model: implementationModel, effort: 'xhigh', schema: IMPLEMENT_SCHEMA }
 )
 
+// ---------- Implement gate：未完成就早退，不进入验证 ----------
+if (!impl || !impl.done) {
+  log('Implement 未完成，早退 escalate（不进入 Verify，避免「没实现完但旧测试全绿被提交」）')
+  return {
+    status: 'escalate',
+    at: 'Implement',
+    reason: impl ? (impl.notImplemented.join('；') || impl.honesty || '实现未标记完成') : 'implement agent 未返回',
+    notImplemented: impl?.notImplemented ?? [],
+    plan,
+    routing,
+  }
+}
+
 // ================= Verify：haiku 机械核对 + GitNexus 实测爆炸半径 =================
+// LOW/MEDIUM：Verify 直接提交（无 Audit 阶段）。HIGH/CRITICAL：Verify 只验证不提交，提交留给 Audit 之后。
 phase('Verify')
+const verifyPrompt = [
+  '你是独立验证层。不要相信上一层的自述，自己跑一遍。',
+  `测试命令：${plan.testCommands.join(' && ')}`,
+  pre ? `Preflight 基线：${pre.baseline.testPassed}/${pre.baseline.testTotal} 通过，typecheck exit=${pre.baseline.typecheckExit}` : '（无基线）',
+  '低于基线视为回退，status 填 red。',
+  '',
+  '## GitNexus 实测爆炸半径（填 actualImpact）',
+  `跑 detect_changes(scope=all, repo="${GNX}", worktree="${WORKTREE}")，统计实际影响的符号数 / 模块数 / 流程数；`,
+  '对改动过的公共 symbol 重跑 context/impact。',
+  '把【真实】数字填进 actualImpact，不要照抄预估。',
+  '',
+  isHighRisk
+    ? `本任务是 ${routing.route}：只验证，**不要 commit**（提交在 Final Audit 通过后由提交层完成）。`
+    : `全绿后提交：${K_GIT_SAFE}，commit message 引用 ${MILESTONE}，把 commit hash 填进 commits。`,
+  '没有测试输出或退出码作证据，不得勾选任何 checkbox。',
+  K_FAIL_LOUD,
+].join('\n')
+
 const verify = await agent(
-  [
-    '你是独立验证 + 提交层。不要相信上一层的自述，自己跑一遍。',
-    `测试命令：${plan.testCommands.join(' && ')}`,
-    '低于计划声称的基线视为回退，status 填 red。',
-    '',
-    '## GitNexus 实测爆炸半径（填 actualImpact）',
-    `跑 detect_changes(scope=all)，repo=${GNX}，统计实际影响的符号数 / 模块数 / 流程数；`,
-    '对改动过的公共 symbol 重跑 context/impact。',
-    '把【真实】数字填进 actualImpact，不要照抄预估。',
-    '',
-    `全绿后提交：${K_GIT_SAFE}`,
-    `commit message 引用 ${MILESTONE}。没有测试输出或退出码作证据，不得勾选任何 checkbox。`,
-    K_FAIL_LOUD,
-  ].join('\n'),
+  verifyPrompt,
   { label: 'verify', phase: 'Verify', model: MODEL_VERIFY, schema: VERIFY_SCHEMA }
 )
 
-// ---------- routeMiss：JS 对比预估 vs 实测（确定性） ----------
+// ---------- routeMiss：JS 对比预估 vs 实测（三维度，确定性） ----------
+// 任一维度「实测明显超预估」（超 50% 且绝对值超 3）即 routeMiss。
+const significant = (actual, predicted) => actual > predicted * 1.5 && (actual - predicted) > 3
 let routeMiss = false
 let blastRadiusDelta = null
 if (plan?.predictedImpact && verify?.actualImpact) {
-  blastRadiusDelta = verify.actualImpact.affectedSymbols - plan.predictedImpact.affectedSymbols
-  // 实测明显超出预估：超 50% 且绝对值超 3 → routeMiss
-  routeMiss = blastRadiusDelta > 3 && verify.actualImpact.affectedSymbols > plan.predictedImpact.affectedSymbols * 1.5
+  const p = plan.predictedImpact
+  const a = verify.actualImpact
+  blastRadiusDelta = {
+    symbols: a.affectedSymbols - p.affectedSymbols,
+    modules: a.affectedModules - p.affectedModules,
+    processes: a.processes - p.processes,
+  }
+  routeMiss = significant(a.affectedSymbols, p.affectedSymbols)
+    || significant(a.affectedModules, p.affectedModules)
+    || significant(a.processes, p.processes)
   if (routeMiss) {
-    const msg = `routeMiss：实测影响 ${verify.actualImpact.affectedSymbols} 符号，超出预估 ${plan.predictedImpact.affectedSymbols}（delta +${blastRadiusDelta}）`
+    const msg = `routeMiss：实测影响超预估（symbols +${blastRadiusDelta.symbols} / modules +${blastRadiusDelta.modules} / processes +${blastRadiusDelta.processes}）`
     log('⚠️ ' + msg)
     if (verify.scanFindings) verify.scanFindings.push(msg)
   }
 }
 
 // ================= Final Audit：CRITICAL 必跑；HIGH + routeMiss 触发 =================
-const needsAudit = routing.route === 'CRITICAL' || (routeMiss && (routing.route === 'HIGH' || routing.route === 'CRITICAL'))
+const needsAudit = routing.route === 'CRITICAL' || (routeMiss && isHighRisk)
 let audit = null
 if (needsAudit) {
   phase('Audit')
@@ -564,26 +688,61 @@ if (needsAudit) {
       `路由：${routing.route}` + (routeMiss ? `，且出现 routeMiss（实测影响超预估）` : ''),
       `计划：\n${planDigest}`,
       `实现者自述：filesChanged=${(impl?.filesChanged ?? []).map(f => f.path).join(', ')}；notImplemented=${(impl?.notImplemented ?? []).join('；') || '无'}`,
-      `验证结果：status=${verify?.status ?? '?'}，${verify?.testPassed ?? '?'}/${verify?.testTotal ?? '?'} 通过，commits=${(verify?.commits ?? []).length}`,
+      `验证结果：status=${verify?.status ?? '?'}，${verify?.testPassed ?? '?'}/${verify?.testTotal ?? '?'} 通过`,
       verify?.scanFindings?.length ? `scanFindings：\n${verify.scanFindings.map(s => `- ${s}`).join('\n')}` : '',
       '',
       '重点审计：routeMiss 暴露的低估、未验证假设、跨模块副作用、回滚完整性。每条 finding 给 evidence。',
-      'verdict=accept / needs-rework / escalate-to-human。',
+      'verdict=accept / needs-rework / escalate-to-human。非 accept 将阻止提交。',
     ].filter(Boolean).join('\n'),
     { label: 'final-audit', phase: 'Audit', model: reviewModel, effort: 'high', schema: AUDIT_SCHEMA }
   )
 }
 
+// ================= Commit Gate（JS）→ Commit（仅 HIGH/CRITICAL；LOW/MEDIUM 已在 Verify 提交） =================
+// 最终 status 必须吸收 audit verdict：audit 非 accept 就不提交。
+const auditBlocks = audit && audit.verdict !== 'accept'
+let commitResult = null
+if (isHighRisk) {
+  const canCommit = verify?.status === 'green' && !auditBlocks
+  if (canCommit) {
+    phase('Commit')
+    commitResult = await agent(
+      [
+        '你是提交层。验证已全绿、审计已通过，现在提交。',
+        `${K_GIT_SAFE}`,
+        `commit message 引用 ${MILESTONE}。只提交本次切片，不 push。`,
+        '把 commit hash 填进 commits，committed 置 true。',
+        K_FAIL_LOUD,
+      ].join('\n'),
+      { label: 'commit', phase: 'Commit', model: MODEL_VERIFY, schema: COMMIT_SCHEMA }
+    )
+  } else {
+    log(`Commit Gate 拦截：verify=${verify?.status ?? '?'}，audit=${audit?.verdict ?? '（无）'} → 不提交`)
+  }
+}
+
+// 汇总 commits：LOW/MEDIUM 来自 verify，HIGH/CRITICAL 来自 commitResult
+const commits = isHighRisk ? (commitResult?.commits ?? []) : (verify?.commits ?? [])
+
+// 最终 status：audit 否决优先，其次 verify
+const finalStatus =
+  audit?.verdict === 'needs-rework' ? 'needs-rework'
+    : audit?.verdict === 'escalate-to-human' ? 'escalate-to-human'
+    : (verify?.status ?? 'unknown')
+
 // ================= 返回（含路由遥测，进入 harvest 固化的 result） =================
 return {
-  status: verify?.status ?? 'unknown',
+  status: finalStatus,
   milestone: MILESTONE,
   ts: TS,
   plan,
   review,
+  preflight: pre,
   impl,
   verify,
   audit,
+  commitResult,
+  commits,
   // 路由遥测：进 workflow result，由 harvest-workflow 固化进 docs/ultracode/raw，scan-corpus 聚合
   routing: {
     score: routing.score,
@@ -594,10 +753,11 @@ return {
     reasons: routing.reasons,
     forcedEscalations: routing.forcedEscalations,
     uncertaintyScore: routing.uncertaintyScore,
+    planRiskGate: { planned: plan?.predictedImpact?.risk ?? null, passed: true },
     predictedImpact: plan?.predictedImpact ?? null,
     actualImpact: verify?.actualImpact ?? null,
     blastRadiusDelta,
     routeMiss,
   },
-  broadcast: `[${MILESTONE}] route=${routing.route} score=${routing.score} · ${verify?.status ?? '?'} · ${verify?.testPassed ?? '?'}/${verify?.testTotal ?? '?'} 测试` + (routeMiss ? ' · ⚠️routeMiss' : ''),
+  broadcast: `[${MILESTONE}] route=${routing.route} score=${routing.score} · ${finalStatus} · ${verify?.testPassed ?? '?'}/${verify?.testTotal ?? '?'} 测试 · ${commits.length} 提交` + (routeMiss ? ' · ⚠️routeMiss' : ''),
 }
