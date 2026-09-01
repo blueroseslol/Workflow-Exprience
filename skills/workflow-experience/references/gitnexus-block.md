@@ -53,7 +53,7 @@ hook 会在以下情况提醒：
 gitnexus analyze --verbose --skip-agents-md
 ```
 
-**规则 B —— 当需要用户拍板时**：本轮流程最后添加一个 GitNexus 缓存重建任务，用 haiku 跑（带 `--embeddings` 让语义检索可用，早退后重跑 recon 直接命中新缓存）：
+**规则 B —— 当需要用户拍板时**：本轮流程最后添加一个 GitNexus 缓存重建任务，用 haiku 跑（带 `--embeddings` 让语义检索可用，早退后重跑 recon 直接命中新缓存）。**同样 freshness-gated**：若自上次索引以来 workspace 没有实际变化（如 Recon→Plan→need-decision 全程只读），跳过重建：
 
 ```bash
 gitnexus analyze --embeddings --skills --verbose --skip-agents-md
