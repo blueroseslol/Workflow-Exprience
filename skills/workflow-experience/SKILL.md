@@ -1,6 +1,6 @@
 ---
 name: workflow-experience
-description: 写 Ultracode workflow 脚本时的本机经验库 —— 可粘贴模板、约束句式速查、模型分工与 effort 真相、resume/args 缓存语义。当你要为一个开发任务编写 Workflow 脚本、或需要在拍板边界分段推进 OpenSpec 里程碑时使用。
+description: 写 Ultracode workflow 脚本时的本机经验库 —— 意图路由、可粘贴模板、约束句式速查、模型分工与 effort 真相、resume/args 缓存语义。当用户以 workflow 前缀提交开发需求、要为开发任务编写 Workflow 脚本、或在拍板边界分段推进 OpenSpec 里程碑时使用。
 ---
 
 # Workflow 经验库
@@ -10,6 +10,18 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— 可粘贴
 本文件只放高频常驻项。其余 **按需 Read `references/`**，不要预读。
 
 > 语料：本机 46 个唯一 workflow 脚本体。标「LDL_UGC 专有」者跨项目不适用。
+
+## 意图路由（先判断，再选链）
+
+模板名是内部细节，对用户不报文件名。
+
+| 用户说法 | 选链（复制模板） |
+|---|---|
+| 修 bug / 功能改动 | Recon→评分→Plan→Review→Implement→Verify：`gitnexus-routed.js` |
+| 只调研不改码 | 只读 Recon→Synthesize：`readonly-recon.js` |
+| OpenSpec 多里程碑 | 一里程碑一 workflow、拍板点早退：`stage-with-gates.js` |
+
+**早退续跑**（详见 `references/resume-and-args.md`）：`route-escalation-required`/`replan-required` 必同 session → 直接 `resumeFromRunId`+首轮 args 全量叠加 `nextArgs`：Recon 命中，minRoute/replanFeedback 使 Plan 起重跑；`need-decision` → 同 session resume+`args.decisions`，跨 session 新脚本抄结论进 `COMMON`，从 `docs/ultracode/raw/` 恢复上轮 plan。
 
 ## 索引（按需 Read）
 
@@ -21,7 +33,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— 可粘贴
 | GitNexus 前置/后置检查块 | `references/gitnexus-block.md` |
 | 模型分工与 effort 门控真相 | `references/model-effort.md` |
 | 动态模型路由与 GitNexus 复杂度评分 | `references/dynamic-routing.md` |
-| resume / args / 缓存键语义 | `references/resume-and-args.md` |
+| resume / args / 缓存键 / 两级暂停 | `references/resume-and-args.md` |
 | 踩坑记忆 | `references/pitfalls.md` |
 | 可粘贴成品脚本 | `../../templates/four-phase.js` 等 |
 
@@ -113,7 +125,7 @@ async function askAdvisor(question, context) {
 
 不要把整个 Stage 合并成一个 workflow（resume 是 same-session only，跨会话会**静默全量重跑**；7 里程碑 × 3-4 agent 会越过 25 agent 警告线）。
 
-正确做法：**一个决议边界一个 workflow**，上一轮结论抄进新脚本的 `COMMON` 常量。模板见 `../../templates/stage-with-gates.js`。
+正确做法：**一个决议边界一个 workflow**；续跑按意图路由节的 Resume/Checkpoint 分流。模板见 `../../templates/stage-with-gates.js`。
 
 ## 跨会话
 

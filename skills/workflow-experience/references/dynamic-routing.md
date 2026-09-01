@@ -127,7 +127,7 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 
 | 闸门 | 位置 | 行为 |
 |---|---|---|
-| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required` 并带 `nextArgs.minRoute=<更高等级>`。新 workflow 用 `minRoute` 给路由兜底，**升级粘滞、不会在 Recon 处回落**（否则 Recon 重判 LOW → Plan 再判 HIGH → 再升级 → 死循环）。不在当前 run 中途换模型（保 resume/cache 确定性） |
+| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required` 并带 `nextArgs.minRoute=<更高等级>`。主 agent **同 session 直接 resume**（`resumeFromRunId` + 首轮 args 全量叠加 nextArgs）：Recon 命中缓存，minRoute 给路由兜底使**升级粘滞、不会在 Recon 处回落**（否则 Recon 重判 LOW → Plan 再判 HIGH → 死循环），plannerModel 变 → 仅 Plan 及之后重跑。已跨 session 才开新 workflow（checkpoint）。不在当前 run 中途换模型（保 resume/cache 确定性） |
 | **Review 门** | Review 后 | `revise` → 早退 `replan-required`（实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的过窄问题）；`block` → `blocked` |
 | **Preflight 门** | Preflight 后 | **fail-closed**：`!pre`（agent 未返回）也算失败 → `failed`；`!pre.ready` → `blocked`。不再静默放行 |
 | **Implement 门** | Implement 后 | `!impl \|\| !impl.done` → 早退 `escalate`，避免「没实现完但旧测试全绿被提交」 |
@@ -200,7 +200,7 @@ routing: {
 1. **评分是 JS 纯函数** —— 不消耗 agent、不进缓存键、结果确定。
 2. **route 一次冻结** —— Recon 之后算一次，本轮不变。不在实现中途因 LLM 主观判断从 sonnet 切 opus。
 3. **确定性输入** —— 同 Recon facts + 同阈值 + 同 args = 同 route。路由逻辑禁 `Date.now()` / `Math.random()`。
-4. **需要升级时**：优先**结束当前决议 workflow、返回 escalation 信息、开新 workflow**（与 ADR-003「一个决议一个 workflow」一致），而不是在同一 run 里换模型。
+4. **需要升级时**：绝不在同一 run 里换模型（破缓存确定性），早退 `route-escalation-required` 交回控制权。续跑**同 session 首选 resume**（`resumeFromRunId` + 首轮 args 全量叠加 `nextArgs`：Recon 命中缓存、仅升级段重跑）；已跨 session 才开新 workflow 抄结论进 `COMMON`（checkpoint）。分流细则见 `resume-and-args.md`「两级暂停」与 ADR-005。
 
 > ⚠️ 注意「粘滞 miss」：route 决定 plannerModel，一旦某次运行 route 变了（例如改了阈值 args），Plan 及其后所有 agent 因缓存键变化全部重跑。这是预期行为——阈值调参属于"换一套实验"，本就该全量重跑。
 

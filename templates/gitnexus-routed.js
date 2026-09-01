@@ -5,7 +5,7 @@
 //     → JS 纯函数 computeRouting() 算 ComplexityScore（含 minRoute 下限）
 //     → Plan(路由派生模型，亲自重读代码，输出 predictedImpact.risk)
 //     → Plan Risk Gate(JS：Planner 自评风险高于路由 → 早退 route-escalation-required，带 nextArgs.minRoute)
-//     → Review(fable 对抗；revise/block → 早退 replan-required，不带病实现)
+//     → Review(fable 对抗；revise/block → 早退 replan-required，带 nextArgs.replanFeedback+replanAttempt，有上限，不带病实现)
 //     → Preflight(haiku 建测试基线；fail-closed)
 //     → Implement(路由派生模型；未完成 → 早退 escalate)
 //     → Verify(haiku 验证 + GitNexus 实测，**绝不提交**)
@@ -17,11 +17,17 @@
 //   - 所有 route 统一 Verify/Commit 分离：routeMiss 在提交前计算，
 //     LOW/MEDIUM 也能在提交前被 routeMiss 拦住并升级 Audit（v2 是 LOW/MEDIUM 先提交后才发现）
 //   - needsAudit = CRITICAL || routeMiss —— LOW 的 routeMiss 比 HIGH 更值得审计
-//   - minRoute：Plan Risk Gate 升级带 nextArgs.minRoute，新 workflow 以此兜底，避免升级-回落死循环
+//   - minRoute：Plan Risk Gate 升级带 nextArgs.minRoute；主 agent 同 session 用 resumeFromRunId
+//     叠加 nextArgs 续跑（Recon 缓存命中，仅 Plan 及之后重跑），跨 session 才开新 workflow，
+//     minRoute 兜底使升级粘滞、不在 Recon 处回落（避免升级-回落死循环）
 //   - Preflight fail-closed：agent 未返回(null) 也算失败，不再静默放行
 //   - Commit 失败不落 green：commitExpected 而未成功 → status=commit-failed
 //   - fail-safe 不再编造 score=75（落在 CRITICAL 区间却标 HIGH，污染统计），改为 score=null + failsafe
 //   - Final Audit 强制亲自 git diff / Read 变更 / 复查 caller，不得只摘要转述
+//   - replan-required 有界且可推进：revise 但反馈为空 → fail-closed 直接 blocked；
+//     否则 nextArgs 带回 replanAttempt+1 与累计 replanFeedback，二者都拼进 Plan prompt
+//     （attempt 每轮递增 + 反馈累计 → prompt 每轮必变 → 缓存必 miss，杜绝相同意见无限重放）；
+//     超过 maxReplan（默认 3）次仍 revise → blocked 转人工，不再自动续跑
 //
 // 定位：与 four-phase.js（稳定 baseline）并存的【实验模板】。
 // 路由依据与阈值见 skills/workflow-experience/references/dynamic-routing.md
@@ -78,6 +84,17 @@ const REQUIRE_COMMIT = args?.requireCommit ?? true
 
 // 用户已拍板（不得当成 blocker 再问）
 const DECIDED = args?.decisions ?? {}
+
+// 上轮 Review=revise 的修订意见（replan-required 早退时由 nextArgs.replanFeedback 带回）
+// 它会被拼进 Plan prompt —— prompt 进缓存键，所以续跑时 Plan 必重跑且必须产出修订后的计划，
+// 不能像 route-escalation 那样只靠 minRoute 改模型（那只会让同一份计划换模型重放）。
+const REPLAN_FEEDBACK = args?.replanFeedback ?? null
+
+// 重规划轮次与上限：replanAttempt 随每次 replan-required 早退 +1 并拼进 Plan prompt，
+// 保证即使 Review 逐字重复同一意见，prompt 也每轮不同（缓存必 miss，不可能无限重放）；
+// 超过 MAX_REPLAN 仍 revise → blocked 转人工（fail-closed，不无限烧 token）。
+const REPLAN_ATTEMPT = args?.replanAttempt ?? 0
+const MAX_REPLAN = args?.maxReplan ?? 3
 
 // ---------- 复用常量 ----------
 const S_STR_ARR = { type: 'array', items: { type: 'string' } }
@@ -494,6 +511,15 @@ const reconDigest = recon
     ].join('\n')
   : '（Recon 未返回——你必须自己完成全部侦察，不得假设安全）'
 
+const replanDigest = REPLAN_FEEDBACK
+  ? [
+      `## 累计修订意见（第 ${REPLAN_ATTEMPT}/${MAX_REPLAN} 次重规划：必须逐条吸收，产出与上轮不同的计划）`,
+      '上一版计划被 Review 判为 revise 并打回。以下每条都必须在新计划中明确回应（采纳并落进切片/whitelist，或给出带 file:line 证据的反驳）。',
+      '禁止原样重交上一版计划 —— 那只是浪费一轮。若某条意见与本轮重读代码冲突，用 file:line 证据反驳，不要假装吸收。',
+      ...REPLAN_FEEDBACK.map(f => `- ${f}`),
+    ].join('\n')
+  : ''
+
 const plan = await agent(
   [
     `你是 ${MILESTONE} 的规划者（Recon 路由等级 ${routing.route}）。只规划，不改代码，不 commit。`,
@@ -504,6 +530,7 @@ const plan = await agent(
     '',
     reconDigest,
     '',
+    replanDigest,
     '## 重读纪律（关键）',
     'Recon 只是导航器。**你必须亲自重新 Read**：修改入口、关键 caller、关键 callee、public interface、tests、lifecycle/state ownership 代码。',
     K_FILE_LINE,
@@ -529,8 +556,10 @@ if (plan.openQuestionsForUser.length) {
 
 // ---------- Plan Risk Gate（JS）：Recon 误判的第二次纠偏，升级粘滞 ----------
 // Planner 亲自读码后若评估的风险高于 Recon 冻结的路由，不在当前 workflow 中途换模型
-// （会破 resume/cache 确定性），而是早退并交回 nextArgs.minRoute，按「一个决议一个 workflow」开新 workflow。
-// 新 workflow 带 minRoute=<更高等级> 重跑，Recon 再判 LOW 也会被 minRoute 兜底，不会回落死循环。
+// （会破 resume/cache 确定性），而是早退并交回 nextArgs.minRoute。
+// 主 agent 同 session 用 resumeFromRunId + 首轮 args 叠加 nextArgs 续跑：Recon 命中缓存，
+// minRoute 兜底使 Recon 再判 LOW 也不回落（避免升级-回落死循环），仅 Plan 及之后重跑。
+// 已跨 session 才开新 workflow（checkpoint），minRoute 同样兜底。
 const plannedRank = ROUTE_RANK[plan.predictedImpact?.risk] ?? 0
 if (plannedRank > ROUTE_RANK[routing.route]) {
   log(`⚠️ Plan Risk Gate：Planner 自评 ${plan.predictedImpact.risk} 高于 Recon 路由 ${routing.route}，早退升级（minRoute 粘滞）`)
@@ -539,7 +568,7 @@ if (plannedRank > ROUTE_RANK[routing.route]) {
     from: routing.route,
     to: plan.predictedImpact.risk,
     nextArgs: { minRoute: plan.predictedImpact.risk },
-    reason: 'Planner 亲自读码后评估的风险高于 Recon 预判；请带 nextArgs.minRoute 重开一个 workflow，升级即粘滞，不会在 Recon 处回落',
+    reason: 'Planner 亲自读码后评估的风险高于 Recon 预判。同 session 用 resumeFromRunId + 首轮 args 叠加 nextArgs 续跑（Recon 缓存命中，仅升级段重跑）；跨 session 才开新 workflow 并带上 minRoute。升级即粘滞，不会在 Recon 处回落',
     recon,
     plan,
     routing,
@@ -587,13 +616,46 @@ if (needsReview) {
     return { status: 'blocked', at: 'Review', blockers: review.blockers, plan, routing }
   }
   // revise 不带病进 Implement：实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的「whitelist 过窄」。
-  // 早退交回意见，让规划层（或用户）修订计划后再跑。
+  // 早退交回意见，并把累计意见 + replanAttempt 作为 nextArgs 带回 —— 续跑时二者都拼进 Plan prompt
+  // （prompt 进缓存键 → Plan 必重跑且必须产出修订计划），否则同输入重放同一份 Plan/Review，死循环。
   if (review?.verdict === 'revise') {
-    log('Review=revise：早退 replan-required，不进入实现')
+    const roundFeedback = review.blockers.map(b => `${b.issue}（${b.evidence}）`).concat(review.concerns)
+    // fail-closed：revise 却不给任何修订意见 → 续跑只会原样重放同一 Plan/Review，直接 blocked 转人工
+    if (!roundFeedback.length) {
+      return {
+        status: 'blocked',
+        at: 'Review',
+        reason: 'Review 判 revise 但 blockers/concerns 均为空，无可吸收的修订意见（fail-closed，不进入无推进的 replan 循环）',
+        plan,
+        review,
+        routing,
+      }
+    }
+    const attempt = REPLAN_ATTEMPT + 1
+    // 有界：超过上限仍 revise → 转人工，不再自动续跑
+    if (attempt > MAX_REPLAN) {
+      return {
+        status: 'blocked',
+        at: 'Review',
+        reason: `重规划已达上限 ${MAX_REPLAN} 次，Review 仍判 revise，转人工处理`,
+        replanHistory: REPLAN_FEEDBACK ?? [],
+        latestFeedback: roundFeedback,
+        plan,
+        review,
+        routing,
+      }
+    }
+    // 累计反馈 + attempt 都拼进下一轮 Plan prompt（prompt 进缓存键）：
+    // 即使 Review 逐字重复同一意见，prompt 也每轮不同 → Plan 必重跑，杜绝无限重放
+    const replanFeedback = (REPLAN_FEEDBACK ?? []).concat(roundFeedback)
+    log(`Review=revise：早退 replan-required（第 ${attempt}/${MAX_REPLAN} 次），累计反馈与 attempt 随 nextArgs 注入 Plan prompt，不进入实现`)
     return {
       status: 'replan-required',
       milestone: MILESTONE,
-      reviewFeedback: review.blockers.map(b => `${b.issue}（${b.evidence}）`).concat(review.concerns),
+      replanAttempt: attempt,
+      reviewFeedback: replanFeedback,
+      nextArgs: { replanFeedback, replanAttempt: attempt },
+      reason: 'Review 判 revise。同 session 用 resumeFromRunId + 首轮 args 叠加 nextArgs 续跑：Recon 缓存命中，累计 replanFeedback 与 replanAttempt 改变 Plan prompt → Plan 及之后重跑并吸收修订意见；超过 maxReplan 次仍 revise 将 blocked 转人工。',
       plan,
       routing,
     }

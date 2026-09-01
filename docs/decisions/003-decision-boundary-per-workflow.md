@@ -69,3 +69,5 @@ Workflow({ scriptPath, resumeFromRunId: '<runId>', args: { decisions: { '5.4': '
 因为 `args` 不进缓存键，把决议拼进里程碑 N 的 prompt 后，1..N-1 全部命中、N 及之后重跑 —— 正是想要的语义。
 
 但这是**优化**，不是**主路径**。
+
+> **2026-09-01 修订（见 ADR-005）**：上文「优化非主路径」仅适用于本 ADR 的场景——**等用户拍板**（常跨 session）。对**必然同 session 的自动续跑**（`route-escalation-required` / `replan-required`，主 agent 当场处理、不等用户），resume 已由 ADR-005 提升为主路径：三个 blocker 在该场景均不成立（同 session 确定、单 milestone 仅 4-8 agent 不越线、续跑不改脚本）。

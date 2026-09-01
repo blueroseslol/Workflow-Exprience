@@ -52,6 +52,35 @@ journal 路径含 sessionId：
 
 历史数据：单 run token 中位数 302k、p90 1.06M。7 个里程碑 × 3-4 agent = 21-28 个 agent，**开跑即越线**。
 
+## Resume vs Checkpoint：两级暂停
+
+「暂停后续跑」是两个不同的机制，**按 session 边界分流**，不要混用：
+
+| | Resume | Checkpoint |
+|---|---|---|
+| 保存什么 | 计算缓存（agent 结果） | 开发状态（plan / routing / 决议 / 进度） |
+| 机制 | 同 scriptPath + `resumeFromRunId` + 新 args | 新脚本，上轮结论抄进 `COMMON` |
+| 前提 | 同 session、脚本一字节未改 | 无 —— 跨 session 的唯一选择 |
+| 成本 | 未变前缀全部 CACHE HIT | 重跑只读 recon（中位 ~10 万 token） |
+
+**按早退状态分流：**
+
+1. `route-escalation-required` / `replan-required` —— 主 agent 可自动处理、**不等用户拍板、必然同 session** → 首选 resume：
+
+   ```
+   Workflow({ scriptPath, resumeFromRunId, args: { ...首轮args, ...result.nextArgs } })
+   ```
+
+   两者都走 resume，但**推进机制不同，不能混为一谈**：
+   - `route-escalation-required`：`nextArgs.minRoute` 经 JS 纯函数改变 route。跨模型档（LOW/MEDIUM ↔ HIGH/CRITICAL）时 `plannerModel` 变（`model` 进缓存键）；同档升级（LOW→MEDIUM、HIGH→CRITICAL）模型不变，但 Plan prompt 内嵌了变化后的 `routing.route`（prompt 进缓存键）—— 二者任一都使 Plan 起缓存 miss、Plan 及之后重跑；Recon 的 prompt/opts 未变 → **命中**。正是「只升级 Planner 及以后，不再花钱重读代码」。⚠️ 同档升级完全靠 prompt 里的 route 字段失效，维护模板时不得删它。
+   - `replan-required`：`nextArgs.replanFeedback`（**累计**的 Review blockers+concerns）与 `nextArgs.replanAttempt`（轮次计数，每轮 +1）都被拼进 **Plan prompt** —— prompt 进缓存键 → Plan 必重跑且被要求逐条吸收修订意见；Recon 同样命中。attempt 递增保证即使 Review 逐字重复同一意见，prompt 也每轮不同，不可能无限重放；超过 `maxReplan`（默认 3）次仍 revise 则模板直接 `blocked` 转人工；revise 但反馈为空则 fail-closed 直接 `blocked`。**主 agent 续跑时必须原样带回整个 `nextArgs`，不得丢弃** —— 否则同一份输入会重放同一份 Plan/Review，形成不可推进的早退循环。
+
+2. `need-decision` —— 必须等用户拍板：
+   - 用户**同 session 立即回答** → resume + `args.decisions`（1..N-1 全命中）
+   - **已跨 session**（隔夜、`/clear`、重启）→ journal 已失效，resume 会**静默全量重跑** —— 用 checkpoint：新脚本抄结论进 `COMMON`，并从 harvest 固化的 `docs/ultracode/raw/wf_*.json` 读上轮完整 result（plan / routing / decisions）作为输入；`.claude/progress/*.jsonl` 提供跨会话进度摘要
+
+⚠️ **resume 的 args 是全量替换，不是合并**：首轮 args（`repo` / `task` / `milestone` / `ts`…）必须原样带上再叠加 `nextArgs` / `decisions`，否则脚本回退到 `<占位>` 默认值。
+
 ## 因此：拍板边界用「一个决议一个 workflow」
 
 **不要**把整个 Stage 合成一个 workflow 靠 resume 续跑。**要**这样做：
@@ -71,11 +100,10 @@ if (plan.openQuestionsForUser.length && !DECIDED['5.4']) {
 }
 ```
 
-主 agent 拿到 `status: 'need-decision'` 后用 **AskUserQuestion** 问用户（脚本内无任何交互 API），拿到答复后：
+主 agent 拿到 `status: 'need-decision'` 后用 **AskUserQuestion** 问用户（脚本内无任何交互 API），拿到答复后按 session 边界分流（见上「两级暂停」）：
 
-**首选**：写一个新脚本，把上一轮结论抄进 `COMMON` 常量。代价是重跑只读 recon agent，换掉 same-session 依赖、journal 静默失效、25-agent 警告线三个风险。
-
-**次选**（仅当确认同一会话内）：同 scriptPath + `resumeFromRunId` + 新 `args.decisions`。因为 args 不进缓存键，把决议拼进里程碑 N 的 prompt 后，1..N-1 全部命中、N 及之后重跑 —— 正是想要的语义。
+- **同 session**（用户立即回答）：同 scriptPath + `resumeFromRunId` + 新 `args.decisions`。因为 args 不进缓存键，把决议拼进里程碑 N 的 prompt 后，1..N-1 全部命中、N 及之后重跑 —— 正是想要的语义。
+- **已跨 session**：写一个新脚本，把上一轮结论抄进 `COMMON` 常量（checkpoint）。重跑只读 recon 在此时不是代价而是唯一路径 —— journal 本来就随旧 session 失效了。上轮 plan / routing / decisions 从 `docs/ultracode/raw/wf_*.json` 恢复。
 
 ## args 的正确用法
 
