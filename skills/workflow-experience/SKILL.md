@@ -5,6 +5,8 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— 可粘贴
 
 # Workflow 经验库
 
+本 Skill 是 Claude Code 内置 `workflow-authoring` 的**增量经验层**，不替代其 Workflow DSL / runtime 规范。若当前会话尚未加载 `workflow-authoring`，先调用它；已加载则不要重复调用。两者冲突时，以 `workflow-authoring` 为规范源；只有本库明确记录并实测过的当前版本差异可作为例外。
+
 本文件只放高频常驻项。其余 **按需 Read `references/`**，不要预读。
 
 > 语料：本机 46 个唯一 workflow 脚本体。标「LDL_UGC 专有」者跨项目不适用。
