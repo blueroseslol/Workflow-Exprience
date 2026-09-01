@@ -1,0 +1,6 @@
+{
+  "name": "workflow-experience",
+  "version": "0.1.0",
+  "description": "Ultracode workflow 经验库：可粘贴模板、约束速查、运行固化与跨会话进度提醒",
+  "author": { "name": "loujiajie" }
+}

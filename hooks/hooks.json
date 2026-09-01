@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harvest-workflow.cjs\"",
+            "timeout": 10,
+            "statusMessage": "固化 Ultracode 运行记录..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/skill-pointer.cjs\"",
+            "timeout": 5,
+            "statusMessage": "检查本机 workflow 模板..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/peer-progress.cjs\"",
+            "timeout": 5,
+            "statusMessage": "汇总同项目其他会话进度..."
+          }
+        ]
+      }
+    ]
+  }
+}
