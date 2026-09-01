@@ -87,7 +87,9 @@ const DECIDED = args?.decisions ?? {}
 
 // 上轮 Review=revise 的修订意见（replan-required 早退时由 nextArgs.replanFeedback 带回）
 // 它会被拼进 Plan prompt —— prompt 进缓存键，所以续跑时 Plan 必重跑且必须产出修订后的计划，
-// 不能像 route-escalation 那样只靠 minRoute 改模型（那只会让同一份计划换模型重放）。
+// 不能像 route-escalation 那样只带 minRoute：跨档升级靠 plannerModel 变（model 进缓存键）、
+// 同档升级靠 Plan prompt 内嵌的 route 变化（prompt 进缓存键）——二者都只让 Plan 重跑，
+// 都不会让它吸收修订意见；replan 必须显式带反馈进 prompt。
 const REPLAN_FEEDBACK = args?.replanFeedback ?? null
 
 // 重规划轮次与上限：replanAttempt 随每次 replan-required 早退 +1 并拼进 Plan prompt，

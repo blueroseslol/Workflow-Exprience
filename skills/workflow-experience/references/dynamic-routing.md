@@ -127,7 +127,7 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 
 | 闸门 | 位置 | 行为 |
 |---|---|---|
-| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required` 并带 `nextArgs.minRoute=<更高等级>`。主 agent **同 session 直接 resume**（`resumeFromRunId` + 首轮 args 全量叠加 nextArgs）：Recon 命中缓存，minRoute 给路由兜底使**升级粘滞、不会在 Recon 处回落**（否则 Recon 重判 LOW → Plan 再判 HIGH → 死循环），plannerModel 变 → 仅 Plan 及之后重跑。已跨 session 才开新 workflow（checkpoint）。不在当前 run 中途换模型（保 resume/cache 确定性） |
+| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required` 并带 `nextArgs.minRoute=<更高等级>`。主 agent **同 session 直接 resume**（`resumeFromRunId` + 首轮 args 全量叠加 nextArgs）：Recon 命中缓存，minRoute 给路由兜底使**升级粘滞、不会在 Recon 处回落**（否则 Recon 重判 LOW → Plan 再判 HIGH → 死循环）；缓存失效两条腿——跨档（LOW/MEDIUM↔HIGH/CRITICAL）时 plannerModel 变（model 进缓存键），同档（LOW→MEDIUM、HIGH→CRITICAL）时靠 Plan prompt 内嵌的 route 等级变化（prompt 进缓存键），任一都使 Plan 及之后重跑。已跨 session 才开新 workflow（checkpoint）。不在当前 run 中途换模型（保 resume/cache 确定性） |
 | **Review 门** | Review 后 | `revise` → 早退 `replan-required`（实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的过窄问题）；`block` → `blocked` |
 | **Preflight 门** | Preflight 后 | **fail-closed**：`!pre`（agent 未返回）也算失败 → `failed`；`!pre.ready` → `blocked`。不再静默放行 |
 | **Implement 门** | Implement 后 | `!impl \|\| !impl.done` → 早退 `escalate`，避免「没实现完但旧测试全绿被提交」 |
