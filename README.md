@@ -87,56 +87,8 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 | `skill-pointer` | `PreToolUse(Skill)` | 命中 `workflow-authoring` 时注入 ~30 token 的路径指针 |
 | `peer-progress` | `SessionStart(startup\|clear)` | 汇总同项目其他会话的新进度，硬性截断 10 行 / 1500 字符 |
 
-全部**不动全局 `settings.json`** —— plugin 的 `hooks.json` 是追加。这很重要：全局配置里所有 hook 都指向 `127.0.0.1:15721`，而那**同时是 `ANTHROPIC_BASE_URL`**，动它可能打断所有会话。
 
 三个 hook 的共同纪律：
 - 任何异常都静默 `exit 0`，绝不阻断会话
 - `harvest` 第一件事查 `stop_hook_active`，防递归
 - 跨轮次游标存 `os.tmpdir()`，因为 workflow 是后台任务，Stop 触发时文件可能还没落盘
-
----
-
-## 三条前车之鉴
-
-**1. 上一次沉淀已经烂尾。** `docs/dynamicworkflow` 已经 492K，其中 `generated/` 与 `snippets/` 两个目录**都是空的**，只剩一堆一次性的 prompt 文档。
-
-这次为什么不同：交付的是**可粘贴模板**而不是散文，且 SKILL.md 有体积门禁（≤5200 字符）。
-
-**2. 语料是 n=1 的样本。** 23 个 project 目录里只有 7 个 LDL_UGC 系列有 run。所有约束都深度绑定 OpenSpec 移植上下文。`references/` 里每条都标注了「通用 / LDL_UGC 专有」。
-
-**3. 同名 schema 从未真正被复用。** `PLAN_SCHEMA` 声明 11 次 = **11 个不同签名**，`VERIFY_SCHEMA` 9 次 = 9 个。被复用的是命名习惯，不是代码。
-
-加上沙箱**禁止 `import`/`require`**（AST 层面拒绝），"公共库"在机制上就不成立。所以本项目交付的是**可粘贴片段目录**，不是库。
-
----
-
-## 已知的重要事实
-
-**effort 门控**（详见 `references/model-effort.md`）：
-- `haiku + effort:'max'` 是**空操作**，参数根本不发送
-- `sonnet + effort:'xhigh'` **静默降级**为 high
-- 全程无报错
-
-要表达"验得更严"，用**取证型 schema**（要退出码 + 原始输出尾巴），不要用 effort。
-
-**resume 限制**（详见 `references/resume-and-args.md`）：
-- same-session only —— 跨会话会**静默全量重跑**
-- 脚本一字节不能改
-- 25 agent / 1.5M token 警告线
-
-所以拍板边界用「一个决议一个 workflow」，不用 resume 续跑。
-
----
-
-## 已验证（2026-09-01 实测）
-
-- **args 绑定**：`args` 是 object，`args?.advisorModel ?? 'fable'` 与可选链均生效（probe 实测返回 `advisorModel:"opus", advisorMax:3`）。
-- **脚本前置注释**：被沙箱接受（probe 脚本首行是 `//` 注释仍正常执行）。
-- **三个 hook**：均用构造的 stdin 实测通过（skill-pointer 命中/未命中、harvest 固化 6 run + 幂等 + 递归防护、peer-progress 注入 + 水位推进）。
-
----
-
-## 相关记录
-
-- 立项调研：3 个 Opus 5 workflow，16 agent，231 万 token（2026-09-01）
-- 用户拍板：Q6=一个决议一个 workflow / Q7=砍掉自动优化闭环 / Q5=haiku 可以 commit
