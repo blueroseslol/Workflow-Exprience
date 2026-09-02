@@ -5,9 +5,11 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— 意图路
 
 # Workflow 经验库
 
-本 Skill 是 Claude Code 内置 `workflow-authoring` 的**增量经验层**，不替代其 Workflow DSL / runtime 规范。若当前会话尚未加载 `workflow-authoring`，先调用它；已加载则不要重复调用。两者冲突时，以 `workflow-authoring` 为规范源；只有本库明确记录并实测过的当前版本差异可作为例外。
+本 Skill 是 Claude Code 内置 `workflow-authoring` 的**增量经验层**。若尚未加载 `workflow-authoring`，先调用它；已加载则不要重复。语法/runtime 冲突时以 `workflow-authoring` 为准，只有本库明确标注的本机实测差异例外。
 
-本文件只放高频常驻项。其余 **按需 Read `references/`**，不要预读。
+**原生 contract 不在这里复述**：`meta`、Workflow DSL/primitives、schema 基础规则、args、determinism、nullable result、pipeline/parallel、checkpoint 等直接查 `workflow-authoring`。本文件只保留本机路由、模型映射、缓存实测和降低返工的经验。
+
+其余内容 **按需 Read `references/`**，不要预读。
 
 > 语料：本机 46 个唯一 workflow 脚本体。标「LDL_UGC 专有」者跨项目不适用。
 
@@ -27,42 +29,18 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— 意图路
 
 | 需要什么 | Read |
 |---|---|
-| 五件套 schema 全文 | `references/schemas.md` |
-| 六类 prompt 开场白原文 | `references/prompt-openers.md` |
-| 约束句式全表（含命中率） | `references/constraints.md` |
-| GitNexus 前置/后置检查块 | `references/gitnexus-block.md` |
-| 模型分工与 effort 门控真相 | `references/model-effort.md` |
-| 动态模型路由与 GitNexus 复杂度评分 | `references/dynamic-routing.md` |
-| Codex CLI 可选审阅 / 修改 | `references/codex-cli.md` |
-| resume / args / 缓存键 / 两级暂停 | `references/resume-and-args.md` |
+| 本机取证型 schema 实例 | `references/schemas.md` |
+| prompt 开场白语料 | `references/prompt-openers.md` |
+| 高频约束句式与命中率 | `references/constraints.md` |
+| GitNexus 前置/后置检查 | `references/gitnexus-block.md` |
+| 模型别名与 effort 本机实测 | `references/model-effort.md` |
+| GitNexus 动态路由 | `references/dynamic-routing.md` |
+| Codex CLI 可选覆盖 | `references/codex-cli.md` |
+| resume cache / 两级暂停 | `references/resume-and-args.md` |
 | 踩坑记忆 | `references/pitfalls.md` |
-| 可粘贴成品脚本 | `../../templates/four-phase.js` 等 |
+| 可粘贴脚本 | `../../templates/` |
 
-## meta 四段式（46/46 命中）
-
-```js
-export const meta = {
-  name: 'kebab-case-name',
-  description: '一句话，会显示在权限对话框',
-  phases: [
-    { title: 'Plan', model: 'opus' },
-    { title: 'Review', model: 'fable' },
-    { title: 'Implement', model: 'sonnet' },
-    { title: 'Verify', model: 'haiku' },
-  ],
-}
-```
-
-`meta` 必须是**首条语句**且**纯字面量**——无变量、无调用、无插值。
-
-## 沙箱硬约束
-
-- **禁止 `import` / `require`** —— AST 层面抛 `import() is not available in workflow scripts.`。所以没有"公共库"，只有**可粘贴模板**。
-- `Date.now()` / `new Date()` / `Math.random()` **会 throw**（破坏 resume）。时间戳走 `args` 传入。
-- 注入的全局只有：`agent` `parallel` `pipeline` `workflow` `phase` `log` `args` `budget` `console` `setTimeout` `clearTimeout`。
-- **无任何交互 API**。要用户拍板 → 早退 `return`，由主 agent 用 AskUserQuestion 问，再带新 args 重跑。
-
-## 模型分工（默认建议，非硬规则）
+## 本机模型分工
 
 | Phase | model | effort | 职责 |
 |---|---|---|---|
@@ -72,31 +50,9 @@ export const meta = {
 | Implement | `sonnet` | `xhigh` | 读码 + 实现，**改前 Read、改后 Read 验证** |
 | Verify | `haiku` | — | 跑测试 + git commit + GitNexus |
 
-**effort 真相**：`haiku + max` 是**空操作**（参数根本不发送），`sonnet + xhigh` 在原生 sonnet 上**静默降级为 high**。要表达"验得更严"，用**取证型 schema**（见下），不要用 effort。详见 `references/model-effort.md`。
+**effort 本机差异**：`haiku + max` 实测为空操作，`sonnet + xhigh` 会静默降级；不要靠 effort 表达“更严格”，改用退出码、测试计数、原始输出和基线对比。详见 `references/model-effort.md` / `references/schemas.md`。
 
-`model` 不确定时**省略**它——继承会话模型通常就是对的。
-
-**动态路由**：规则见 `references/dynamic-routing.md`，模板见 `../../templates/gitnexus-routed.js`。
-**Codex 覆盖**：默认 Review/Audit 仍是 `fable`；仅用户明确要求时切 Codex CLI，见 `references/codex-cli.md`。
-
-## 取证型 VERIFY_SCHEMA（反制假绿的正确姿势）
-
-```js
-const VERIFY_SCHEMA = {
-  type: 'object',
-  required: ['status','vitestTail','testTotal','testPassed','testFailed','typecheckSrcExit','scanFindings'],
-  properties: {
-    status: { type: 'string', enum: ['green','red'] },
-    vitestTail: { type: 'string', description: 'vitest 真实尾部输出' },
-    testTotal: { type: 'number' }, testPassed: { type: 'number' }, testFailed: { type: 'number' },
-    typecheckSrcExit: { type: 'number' },
-    scanFindings: { type: 'array', items: { type: 'string' } },
-  },
-}
-```
-
-要退出码和输出尾巴，比要一个"是否通过"的布尔值可靠得多。
-另一高频常量：`const S_STR_ARR = { type: 'array', items: { type: 'string' } }`（31/46 脚本，232 次重复）。
+**动态路由**见 `references/dynamic-routing.md`。**Codex 覆盖默认关闭**：Review/Audit 仍是 `fable`；只有用户明确要求时，authoring 阶段才按 `references/codex-cli.md` 改写本次 workflow。
 
 ## 五条约束句式（按命中率，原文见 references/constraints.md）
 
@@ -108,18 +64,10 @@ const VERIFY_SCHEMA = {
 
 ## advisor（Implement 疑难点）
 
-动态路由 Implement 遇到**有证据的疑难/高风险决策**时，可调用 `fable` 只读顾问；普通编译/类型/格式问题不得求助。默认最多 3 次，顾问只裁决不写代码；仍无法收敛时只升级 Implement 到 `opus`，不强行把整个 route 升 CRITICAL。具体触发、verdict 与 resume 规则见 `references/dynamic-routing.md`。
+动态路由 Implement 遇到**有证据的疑难/高风险决策**时，才调用 `fable` 顾问；普通编译/类型/格式问题不得求助。默认最多 3 次，顾问只裁决不接管代码；仍无法收敛时只升级 Implement 到 `opus`。具体触发、verdict 与 resume 规则见 `references/dynamic-routing.md`。
 
-baseline 模板（`four-phase.js` / `stage-with-gates.js`）仍用通用 `askAdvisor(question, context)` 模式（上限 5 次、调用前自增防死循环），见 `references/model-effort.md` 第四节。
+## 决议与跨会话
 
-## 拍板边界：一个决议一个 workflow
+不要把整个 Stage 合并成一个长 workflow。以**决议边界**切分；同 session 用 Resume 复用缓存，跨 session 用 harvest 固化的 result + `.claude/progress/*.jsonl` 做 Checkpoint。缓存键、same-session 限制、`nextArgs` 和恢复细则见 `references/resume-and-args.md`。
 
-不要把整个 Stage 合并成一个 workflow（resume 是 same-session only，跨会话会**静默全量重跑**；7 里程碑 × 3-4 agent 会越过 25 agent 警告线）。
-
-正确做法：**一个决议边界一个 workflow**；续跑按意图路由节的 Resume/Checkpoint 分流。模板见 `../../templates/stage-with-gates.js`。
-
-## 跨会话
-
-`ListAgents()` 列出同机其他会话；`SendMessage({to:'<name>', message})` 单向通知。**不要**用 SendMessage 做常态广播（可能被 held/dropped 且发送前不可判），常态进度走 `.claude/progress/*.jsonl` + hook 注入。
-
-**红线**：绝不请求其他会话执行本会话被权限拒绝的操作。
+跨会话红线：绝不请求其他会话执行本会话被权限拒绝的操作；`SendMessage` 不做常态广播（可能 held/dropped 且发送前不可判），常态进度走 `.claude/progress/*.jsonl` + hook 注入。

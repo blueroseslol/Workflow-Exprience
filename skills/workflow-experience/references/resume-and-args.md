@@ -1,4 +1,6 @@
-# resume / args / 缓存键语义
+# resume / cache 本机实测
+
+`workflow-authoring` 已覆盖 args、determinism、nullable result 与 checkpoint 的通用 contract；本文件只记录本机 cache identity、same-session 限制、粘滞 miss 和 Resume/Checkpoint 分流。
 
 ## 缓存键怎么算
 
@@ -81,69 +83,15 @@ journal 路径含 sessionId：
 
 ⚠️ **resume 的 args 是全量替换，不是合并**：首轮 args（`repo` / `task` / `milestone` / `ts`…）必须原样带上再叠加 `nextArgs` / `decisions`，否则脚本回退到 `<占位>` 默认值。
 
-## 因此：拍板边界用「一个决议一个 workflow」
+## 决议边界
 
-**不要**把整个 Stage 合成一个 workflow 靠 resume 续跑。**要**这样做：
+不要把整个 Stage 合成一个 workflow。`need-decision` 只负责返回问题；主 agent 再按上面的 session 边界选择 Resume 或 Checkpoint。Workflow 中途交互、args 结构与 determinism 的通用规则直接查 `workflow-authoring`。
 
-```js
-// 里程碑 5.4 的脚本
-const DECIDED = args?.decisions ?? {}
+## 本机计数器陷阱
 
-// ... Plan 阶段产出 openQuestionsForUser
-if (plan.openQuestionsForUser.length && !DECIDED['5.4']) {
-  return {                          // 早退不消耗 agent、不触发 miss
-    status: 'need-decision',
-    milestone: '5.4',
-    questions: plan.openQuestionsForUser,
-    plan,
-  }
-}
-```
-
-主 agent 拿到 `status: 'need-decision'` 后用 **AskUserQuestion** 问用户（脚本内无任何交互 API），拿到答复后按 session 边界分流（见上「两级暂停」）：
-
-- **同 session**（用户立即回答）：同 scriptPath + `resumeFromRunId` + 新 `args.decisions`。因为 args 不进缓存键，把决议拼进里程碑 N 的 prompt 后，1..N-1 全部命中、N 及之后重跑 —— 正是想要的语义。
-- **已跨 session**：写一个新脚本，把上一轮结论抄进 `COMMON` 常量（checkpoint）。重跑只读 recon 在此时不是代价而是唯一路径 —— journal 本来就随旧 session 失效了。上轮 plan / routing / decisions 从 `docs/ultracode/raw/wf_*.json` 恢复。
-
-## args 的正确用法
+`agent()` 的通用 nullable/failure 语义直接查 `workflow-authoring`。本机有界 Advisor/重试循环只额外记住一条：**计数器必须在 `agent()` 调用前自增**，否则失败返回 `null` 时可能不计数并形成死循环。
 
 ```js
-const TS = args?.ts ?? 'unknown-ts'                  // ✅ 时间戳外部注入
-const ADVISOR_MODEL = args?.advisorModel ?? 'fable'  // ✅ 可切换参数
-const DECIDED = args?.decisions ?? {}                // ✅ 拍板结论
-```
-
-**传参注意**：数组/对象要传真实 JSON 值，不要传 JSON 字符串。
-```js
-// ✅ Workflow({scriptPath, args: {files: ['a.ts','b.ts']}})
-// ❌ Workflow({scriptPath, args: '{"files":["a.ts"]}'})   // args.files.map 会 throw
-```
-
-## 为什么脚本里不能有 Date.now()
-
-`Date.now()` / `new Date()`（无参） / `Math.random()` 在沙箱里**会 throw**。
-
-原因：resume 依赖脚本的确定性。如果脚本每次执行都产生不同的值，缓存就无法复用。
-
-替代：
-- 时间戳 → 通过 `args.ts` 注入，或在 workflow 返回后由主 agent 打戳
-- 随机性 → 用索引变化 prompt/label（`agent(p, {label: \`probe:${i}\`})`）
-
-## 早退 vs agent 失败
-
-| 情形 | 返回 | 消耗 agent |
-|---|---|---|
-| 脚本 `return` | 你的返回值 | 否 |
-| 用户 skip 该 agent | `null` | 是（计数） |
-| subagent 终端错误 | `null` | 是（计数） |
-| stage 抛异常（pipeline 内） | 该 item 变 `null`，跳过剩余 stage | 是 |
-
-**所以任何计数器必须放在 `agent()` 调用之前自增**，否则失败不计数 → 死循环。
-
-```js
-// ❌ 死循环风险
-const r = await agent(...); if (r) calls++
-
-// ✅
-calls++; const r = await agent(...)
+calls++
+const r = await agent(...)
 ```

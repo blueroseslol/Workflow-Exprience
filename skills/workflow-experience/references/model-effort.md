@@ -1,4 +1,6 @@
-# 模型分工与 effort 门控真相
+# 模型别名与 effort 本机实测
+
+`workflow-authoring` 已负责通用 `model` / `effort` contract；本文件只记录本机别名映射、语料分工和实测偏差。
 
 ## 一、语料实证的分工
 
@@ -10,7 +12,7 @@
 | Implement | `sonnet` | 7 | 读码 + 实现 |
 | Verify | `haiku` | 9 | 跑测试 + commit + GitNexus |
 
-**这是默认建议，不是硬规则。** 官方指引明写 *when unsure, omit model* —— 省略时继承会话模型，通常就是对的。
+这是本机经验，不覆盖 `dynamic-routing.md` 的 HIGH/CRITICAL 路由。
 
 ## 二、本机别名映射（重要）
 
@@ -44,32 +46,7 @@
 
 ### 那「让 haiku 验得更严」怎么实现？
 
-**用 schema 施压，不用 effort。**
-
-```js
-// ❌ 无效：参数根本不发送
-agent(prompt, { model: 'haiku', effort: 'max' })
-
-// ✅ 有效：required 字段强迫它必须去取证
-const VERIFY_SCHEMA = {
-  type: 'object',
-  required: ['status', 'vitestTail', 'testTotal', 'testPassed', 'testFailed', 'typecheckSrcExit'],
-  properties: {
-    status: { type: 'string', enum: ['green', 'red'] },        // 二元枚举，不给「基本通过」的余地
-    vitestTail: { type: 'string', description: 'vitest 真实尾部输出' },  // 要原始输出
-    testTotal: { type: 'number' }, testPassed: { type: 'number' }, testFailed: { type: 'number' },
-    typecheckSrcExit: { type: 'number' },                       // 要退出码
-  },
-}
-agent(prompt, { model: 'haiku', schema: VERIFY_SCHEMA })
-```
-
-**原理**：schema 校验发生在工具调用层，字段缺失或类型不符会让模型**重试**。要一个数字和一段原始输出，比要一个布尔值难伪造得多 —— 它必须真的去跑那条命令。
-
-三个设计要点：
-1. **enum 收紧** —— `['green','red']` 而非自由字符串，堵掉「大部分通过」这种模糊回答。
-2. **取证字段** —— 退出码、测试计数、输出尾巴。都是可被人事后复核的硬数据。
-3. **基线对比** —— `baselineDelta` 字段配合 Preflight 的基线数字，让「覆盖面缩水」也能被发现（全绿但测试数变少 = 回退）。
+不要依赖无效 effort。使用本机取证型 schema：二元 verdict、退出码、测试计数、原始输出尾部、Preflight 基线对比。实例集中在 `schemas.md`，这里不重复 Workflow 的通用 schema contract。
 
 ### 如果确实需要 sonnet 的 xhigh
 
@@ -91,12 +68,4 @@ const ADVISOR_MODEL = args?.advisorModel ?? 'fable'   // 默认 fable，传 'opu
 
 ⚠️ **advisor agent 必须放调用链尾部或拆成独立 workflow** —— `model` 进缓存键，切换 `advisorModel` 会让该 agent **及其后所有 agent** 重跑。
 
-## 五、effort 取值参考
-
-| 值 | 何时用 |
-|---|---|
-| 省略 | 默认。继承会话 effort |
-| `'low'` | 机械性阶段（文件搬运、格式化） |
-| `'high'` | Plan / Review —— 需要推理但有明确输入 |
-| `'xhigh'` | 复杂实现、大范围调研（注意 sonnet 上会降级） |
-| `'max'` | 目前无可靠用例。haiku 上是空操作 |
+通用 effort 取值与继承规则直接查 `workflow-authoring`；本文件只维护上述本机异常。

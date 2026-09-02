@@ -2,6 +2,8 @@
 
 默认策略：**不启用 Codex CLI**。现有 Review / Final Audit 继续使用 `fable`（本机映射 GPT-5.6 Sol）。只有用户在 `workflow ...` 需求里明确指定 Codex CLI 时，才切换对应阶段；不得自行启用。
 
+> **实现边界**：这是 **authoring-time override**，不是 `gitnexus-routed.js` 静态模板内置开关。用户点名 Codex 时，`workflow-experience` 必须在生成/复制本次 workflow 时把 Controller/CLI 阶段真正写进脚本；若没有插入对应调用，不得声称 Codex 已启用。
+
 ## 自然语言开关
 
 主 agent / workflow skill 在 intake 时识别：

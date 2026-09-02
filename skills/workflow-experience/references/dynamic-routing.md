@@ -167,7 +167,7 @@ const ADVISOR_MODEL = args?.advisorModel ?? 'fable'
 const ADVISOR_MAX = args?.advisorMax ?? 3
 ```
 
-顾问只输出 `continue / change-approach / replan / stop-and-ask / escalate-implementation`，**不修改代码**（模板里用 `disallowedTools: ['Edit', 'Write']` 硬约束）。代码 ownership 始终属于 Kimi/Opus。
+顾问只输出 `continue / change-approach / replan / stop-and-ask / escalate-implementation`，代码 ownership 始终属于 Kimi/Opus。模板用 `disallowedTools: ['Edit', 'Write']` 禁掉直接编辑；**Bash 仍可执行，因此“Bash 不得写文件”目前是 prompt 约束，不要描述成完全的硬只读沙箱**。
 
 `advisorModel` 进缓存键：一次 run 中途切换它会让 Advisor 及其后所有 agent 重跑——预算内选定就不要中途换。
 
