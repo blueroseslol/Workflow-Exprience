@@ -106,22 +106,11 @@ const VERIFY_SCHEMA = {
 4. **证据才勾选**（18/46）— `没有测试输出或命令退出码作证据，不得勾选任何 checkbox。`
 5. **git 安全**（14/46）— `禁止 git add . / -A，逐文件 add；feat 与 docs 分两笔；不 push。`
 
-## advisor（Sonnet 卡住时求助）
+## advisor（Implement 疑难点）
 
-```js
-const ADVISOR_MODEL = args?.advisorModel ?? 'fable'   // 可传 'opus' 切换
-const ADVISOR_MAX = 5
-let advisorCalls = 0
+动态路由 Implement 遇到**有证据的疑难/高风险决策**时，可调用 `fable` 只读顾问；普通编译/类型/格式问题不得求助。默认最多 3 次，顾问只裁决不写代码；仍无法收敛时只升级 Implement 到 `opus`，不强行把整个 route 升 CRITICAL。具体触发、verdict 与 resume 规则见 `references/dynamic-routing.md`。
 
-async function askAdvisor(question, context) {
-  if (advisorCalls >= ADVISOR_MAX) return null
-  advisorCalls++            // ★ 必须在调用前自增：agent() 失败返回 null，否则死循环
-  return await agent(`你是 advisor。${question}\n\n上下文：\n${context}`,
-    { label: `advisor:${advisorCalls}`, phase: 'Review', model: ADVISOR_MODEL, effort: 'high', schema: ADVISOR_SCHEMA })
-}
-```
-
-**advisor agent 必须放调用链尾部或拆成独立 workflow** —— `model` 进缓存键，切换 advisorModel 会让它及其后所有 agent 重跑。
+baseline 模板（`four-phase.js` / `stage-with-gates.js`）仍用通用 `askAdvisor(question, context)` 模式（上限 5 次、调用前自增防死循环），见 `references/model-effort.md` 第四节。
 
 ## 拍板边界：一个决议一个 workflow
 

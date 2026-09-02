@@ -68,6 +68,7 @@ for (const f of files) {
       file: f,
       // 动态路由遥测（gitnexus-routed.js 模板把 routing 对象放进 workflow result）
       routing: (j.result && j.result.routing) ? j.result.routing : null,
+      implementationAdvisor: (j.result && j.result.implementationAdvisor) ? j.result.implementationAdvisor : null,
     })
   } catch {
     /* 跳过坏文件 */
@@ -161,6 +162,23 @@ if (routed.length) {
   console.log('\n按模型组合（plan / implement / review）→ completed 率：')
   for (const [combo, b] of Object.entries(byCombo).sort((a, b2) => b2[1].total - a[1].total)) {
     console.log(`  ${combo.padEnd(28)} n=${b.total} · completed ${pct100(b.completed, b.total)}`)
+  }
+
+  // Implement Advisor：调用率、平均次数、调用后 completed、升级强实现模型比例
+  const advised = routed.filter(r => (r.implementationAdvisor?.calls ?? 0) > 0)
+  if (advised.length) {
+    const advisorCalls = advised.reduce((n, r) => n + (r.implementationAdvisor?.calls ?? 0), 0)
+    const advisorCompleted = advised.filter(r => r.status === 'completed').length
+    const advisorEscalated = advised.filter(r => r.implementationAdvisor?.escalatedToStrong).length
+    const byAdvisorRoute = {}
+    for (const r of advised) {
+      const k = r.routing.route
+      byAdvisorRoute[k] = (byAdvisorRoute[k] || 0) + 1
+    }
+    console.log('\nImplement Advisor：')
+    console.log(`  调用率 ${pct100(advised.length, routed.length)}（${advised.length}/${routed.length}）`)
+    console.log(`  平均 calls ${(advisorCalls / advised.length).toFixed(2)} · 调用后 completed ${pct100(advisorCompleted, advised.length)} · 已升级强实现模型 ${pct100(advisorEscalated, advised.length)}`)
+    console.log(`  route 分布：${Object.entries(byAdvisorRoute).map(([k, v]) => `${k}=${v}`).join('  ')}`)
   }
 
   const totalMiss = routed.filter(r => r.routing.routeMiss).length

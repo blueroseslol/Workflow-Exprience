@@ -67,6 +67,12 @@ const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet' // Kimi K3
 const MODEL_STRONG = args?.strongModel ?? 'opus'     // Claude Opus 5
 const MODEL_REVIEW = args?.reviewModel ?? 'fable'    // GPT-5.6 Sol
 const MODEL_VERIFY = args?.verifyModel ?? 'haiku'    // DeepSeek V4 Flash
+// Implement 顾问：默认 fable，只做只读裁决；最多 3 次，仍不收敛才升级实现模型
+const ADVISOR_MODEL = args?.advisorModel ?? MODEL_REVIEW
+const ADVISOR_MAX = args?.advisorMax ?? 3
+// implementation escalation 只覆盖 Implement，不把整个 route 强行升成 CRITICAL
+const IMPLEMENTATION_MODEL_OVERRIDE = args?.implementationModelOverride ?? null
+const IMPLEMENTATION_ESCALATION_REASON = args?.implementationEscalationReason ?? null
 
 // 路由阈值（args 可调，不写成魔法常量；未来应据 corpus 校准，见 dynamic-routing.md）
 const ROUTE_LOW_MAX = args?.routeLowMax ?? 24
@@ -279,7 +285,10 @@ const PREFLIGHT_SCHEMA = {
 const IMPLEMENT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['done', 'filesChanged', 'notImplemented', 'honesty'],
+  required: [
+    'done', 'filesChanged', 'notImplemented', 'honesty',
+    'needsAdvisor', 'advisorQuestion', 'blockingEvidence',
+  ],
   properties: {
     done: { type: 'boolean' },
     filesChanged: {
@@ -293,6 +302,25 @@ const IMPLEMENT_SCHEMA = {
     },
     notImplemented: { type: 'array', items: { type: 'string' }, description: '计划里有但本轮没做的，必须诚实列出' },
     honesty: { type: 'string', description: '有什么是你没验证的' },
+    needsAdvisor: { type: 'boolean', description: '只有出现有证据的高风险/疑难决策且无法安全继续时才 true' },
+    advisorQuestion: { type: 'string', description: 'needsAdvisor=true 时给顾问的具体问题；否则空字符串' },
+    blockingEvidence: S_STR_ARR,
+  },
+}
+
+// Implement 顾问只给裁决，不接管 workspace
+const IMPLEMENT_ADVISOR_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdict', 'reasoning', 'nextStep', 'evidence'],
+  properties: {
+    verdict: {
+      type: 'string',
+      enum: ['continue', 'change-approach', 'replan', 'stop-and-ask', 'escalate-implementation'],
+    },
+    reasoning: { type: 'string' },
+    nextStep: { type: 'string' },
+    evidence: S_STR_ARR,
   },
 }
 
@@ -492,7 +520,8 @@ log(`路由：score=${routing.score ?? 'failsafe'} → ${routing.route}` + (rout
 
 // 模型链由路由派生
 const plannerModel = (routing.route === 'HIGH' || routing.route === 'CRITICAL') ? MODEL_STRONG : MODEL_DEFAULT
-const implementationModel = routing.route === 'CRITICAL' ? MODEL_STRONG : MODEL_DEFAULT
+const implementationModel = IMPLEMENTATION_MODEL_OVERRIDE
+  ?? (routing.route === 'CRITICAL' ? MODEL_STRONG : MODEL_DEFAULT)
 const reviewModel = MODEL_REVIEW
 const needsReview = ALWAYS_REVIEW || routing.route !== 'LOW'
 const isHighRisk = routing.route === 'HIGH' || routing.route === 'CRITICAL'
@@ -683,34 +712,268 @@ const pre = await agent(
 if (!pre) return { status: 'failed', at: 'Preflight', reason: 'preflight agent 未返回', routing }
 if (!pre.ready) return { status: 'blocked', at: 'Preflight', blockers: pre.blockers, routing }
 
-// ================= Implement =================
+// ================= Implement：Kimi/Opus 主实现 + 有界 Fable Advisor Loop =================
 phase('Implement')
-const impl = await agent(
-  [
-    '你是实现层。按计划逐切片实现。',
-    '',
-    planDigest,
-    '',
-    '硬规则：',
-    '- 只允许修改 whitelist 内的文件；mustNotTouch 内的一律不动。越界即失败。',
-    '- 改前先 Read 目标文件确认现状，改后再 Read 一次确认落盘符合预期。',
-    '- 不要 commit、不要 push（提交层负责）。',
-    '- 计划里有而你没做的，必须写进 notImplemented，不许假装做了。',
-    K_FAIL_LOUD,
-  ].join('\n'),
-  { label: 'implement', phase: 'Implement', model: implementationModel, effort: 'xhigh', schema: IMPLEMENT_SCHEMA }
-)
+let impl = null
+let advisorCalls = 0
+const advisorHistory = []
 
-// ---------- Implement gate：未完成就早退，不进入验证 ----------
-if (!impl || !impl.done) {
-  log('Implement 未完成，早退 escalate（不进入 Verify，避免「没实现完但旧测试全绿被提交」）')
+const implementationAdvisorSummary = () => ({
+  model: ADVISOR_MODEL,
+  calls: advisorCalls,
+  outcomes: advisorHistory,
+  implementationModel,
+  escalatedToStrong: IMPLEMENTATION_MODEL_OVERRIDE === MODEL_STRONG,
+})
+
+for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt++) {
+  const advisorDigest = advisorHistory.length
+    ? [
+        '## 已获得的顾问裁决（必须先自己核对源码/git diff，再决定如何执行；顾问不是事实源）',
+        ...advisorHistory.map((a, i) =>
+          `- #${i + 1} ${a.verdict}: ${a.nextStep}\n  reasoning: ${a.reasoning}\n  evidence: ${a.evidence.join('；') || '（无）'}`
+        ),
+      ].join('\n')
+    : ''
+
+  impl = await agent(
+    [
+      '你是实现层。按计划逐切片实现。',
+      '',
+      planDigest,
+      '',
+      IMPLEMENTATION_ESCALATION_REASON
+        ? `## 上轮实现升级原因\n${IMPLEMENTATION_ESCALATION_REASON}\n你已被升级为更强实现模型，先重新 Read 当前 workspace/git diff 再继续。`
+        : '',
+      advisorDigest,
+      '',
+      '## 顾问触发规则',
+      '正常编译错误、类型错误、明确测试失败、格式问题必须自己解决，禁止滥用顾问。',
+      '只有出现以下任一情况且你已亲自 Read/尝试取证后，才允许 done=false + needsAdvisor=true：',
+      '- 合理修复后测试仍失败且根因不明确；',
+      '- 实际代码与 Plan 的关键假设冲突，或正确实现需要越出 whitelist；',
+      '- 新发现跨模块/public API/schema/concurrency/lifecycle/state machine/persistence/serialization 风险；',
+      '- GitNexus 调用关系与 Planner 假设冲突；',
+      '- 存在两个以上合理但风险明显不同的实现方案，需要独立裁决。',
+      'needsAdvisor=true 时 advisorQuestion 必须具体，blockingEvidence 至少给出一条 file:line / 测试 / git diff / GitNexus 证据。',
+      'done=true 时必须 needsAdvisor=false、advisorQuestion=""；不要为了“保险”调用顾问。',
+      '',
+      '硬规则：',
+      '- 只允许修改 whitelist 内的文件；mustNotTouch 内的一律不动。越界即失败。',
+      '- 每轮继续实现前先 Read 目标文件与当前 git diff，避免覆盖上一轮已落盘修改。',
+      '- 改前先 Read 目标文件确认现状，改后再 Read 一次确认落盘符合预期。',
+      '- 不要 commit、不要 push（提交层负责）。',
+      '- 计划里有而你没做的，必须写进 notImplemented，不许假装做了。',
+      K_FAIL_LOUD,
+    ].filter(Boolean).join('\n'),
+    {
+      label: `implement:${implementAttempt}`,
+      phase: 'Implement',
+      model: implementationModel,
+      effort: 'xhigh',
+      schema: IMPLEMENT_SCHEMA,
+    }
+  )
+
+  if (!impl) {
+    return {
+      status: 'failed',
+      at: 'Implement',
+      reason: 'implement agent 未返回结构化结果',
+      plan,
+      routing,
+      implementationAdvisor: implementationAdvisorSummary(),
+    }
+  }
+  if (impl.done) break
+
+  if (!impl.needsAdvisor) {
+    return {
+      status: 'escalate',
+      at: 'Implement',
+      reason: impl.notImplemented.join('；') || impl.honesty || '实现未完成且未请求顾问',
+      notImplemented: impl.notImplemented,
+      plan,
+      routing,
+      implementationAdvisor: implementationAdvisorSummary(),
+    }
+  }
+
+  if (!impl.advisorQuestion || !impl.blockingEvidence.length) {
+    return {
+      status: 'failed',
+      at: 'ImplementAdvisor',
+      reason: 'needsAdvisor=true 但缺少 advisorQuestion 或 blockingEvidence',
+      impl,
+      plan,
+      routing,
+      implementationAdvisor: implementationAdvisorSummary(),
+    }
+  }
+
+  if (advisorCalls >= ADVISOR_MAX) {
+    if (implementationModel !== MODEL_STRONG) {
+      return {
+        status: 'implementation-escalation-required',
+        from: implementationModel,
+        to: MODEL_STRONG,
+        nextArgs: {
+          implementationModelOverride: MODEL_STRONG,
+          implementationEscalationReason:
+            `Fable Advisor 已调用 ${advisorCalls}/${ADVISOR_MAX} 次仍未收敛。最后问题：${impl.advisorQuestion}`,
+        },
+        reason: '有界 Advisor Loop 已达上限；同 session 用原 scriptPath + resumeFromRunId + 首轮 args 叠加 nextArgs，仅 Implement 及后续因 model/prompt 改变而重跑。',
+        impl,
+        plan,
+        routing,
+        implementationAdvisor: implementationAdvisorSummary(),
+      }
+    }
+    return {
+      status: 'escalate',
+      at: 'Implement',
+      reason: `强实现模型 + ${ADVISOR_MAX} 次顾问仍无法收敛，转人工/用户拍板`,
+      impl,
+      plan,
+      routing,
+      implementationAdvisor: implementationAdvisorSummary(),
+    }
+  }
+
+  // ★ 必须在 agent() 调用前自增：失败/null 也计入上限，避免死循环
+  advisorCalls++
+  const advice = await agent(
+    [
+      '你是 Implement Advisor（只读顾问），任务是给出裁决而不是接管代码。',
+      `仓库根：${REPO}`,
+      `当前实现模型：${implementationModel}`,
+      `路由：${routing.route}`,
+      '',
+      `实现者问题：${impl.advisorQuestion}`,
+      `阻塞证据：\n${impl.blockingEvidence.map(x => `- ${x}`).join('\n')}`,
+      `未完成项：\n${impl.notImplemented.map(x => `- ${x}`).join('\n') || '（无）'}`,
+      `诚实声明：${impl.honesty}`,
+      '',
+      '你必须亲自 Read 相关文件；必要时查看 git diff、测试输出、GitNexus context/impact。',
+      '禁止 Edit/Write，禁止用 Bash 改文件；你只提供分析、证据和下一步。',
+      '不要因为实现者说“困难”就附和。若局部方案可继续，选 continue/change-approach；',
+      '若 Plan 本身错误选 replan；需用户决策选 stop-and-ask；Kimi 已不适合继续时选 escalate-implementation。',
+      'evidence 尽量给 file:line / git diff / 测试 / GitNexus 证据。',
+    ].join('\n'),
+    {
+      label: `implement-advisor:${advisorCalls}`,
+      phase: 'Review',
+      model: ADVISOR_MODEL,
+      effort: 'high',
+      schema: IMPLEMENT_ADVISOR_SCHEMA,
+      disallowedTools: ['Edit', 'Write'],
+    }
+  )
+
+  if (!advice) {
+    return {
+      status: 'failed',
+      at: 'ImplementAdvisor',
+      reason: 'advisor agent 未返回结构化结果（fail-closed）',
+      impl,
+      plan,
+      routing,
+      implementationAdvisor: implementationAdvisorSummary(),
+    }
+  }
+
+  advisorHistory.push({
+    call: advisorCalls,
+    verdict: advice.verdict,
+    reasoning: advice.reasoning,
+    nextStep: advice.nextStep,
+    evidence: advice.evidence,
+  })
+
+  if (advice.verdict === 'stop-and-ask') {
+    return {
+      status: 'need-decision',
+      milestone: MILESTONE,
+      questions: [advice.nextStep],
+      impl,
+      plan,
+      routing,
+      implementationAdvisor: implementationAdvisorSummary(),
+    }
+  }
+
+  if (advice.verdict === 'replan') {
+    const replanAttempt = REPLAN_ATTEMPT + 1
+    const advisorFeedback = [
+      `Implement Advisor: ${advice.reasoning}`,
+      `建议：${advice.nextStep}`,
+      ...advice.evidence.map(x => `证据：${x}`),
+    ]
+    if (replanAttempt > MAX_REPLAN) {
+      return {
+        status: 'blocked',
+        at: 'ImplementAdvisor',
+        reason: `重规划已达上限 ${MAX_REPLAN} 次，Implement Advisor 仍要求 replan，转人工`,
+        plan,
+        routing,
+        implementationAdvisor: implementationAdvisorSummary(),
+      }
+    }
+    const replanFeedback = (REPLAN_FEEDBACK ?? []).concat(advisorFeedback)
+    return {
+      status: 'replan-required',
+      milestone: MILESTONE,
+      replanAttempt,
+      reviewFeedback: replanFeedback,
+      nextArgs: { replanFeedback, replanAttempt },
+      reason: 'Implement Advisor 判断 Plan 本身需要修订；复用现有 replanFeedback/replanAttempt 机制，不创建第二套循环。',
+      impl,
+      plan,
+      routing,
+      implementationAdvisor: implementationAdvisorSummary(),
+    }
+  }
+
+  if (advice.verdict === 'escalate-implementation') {
+    if (implementationModel !== MODEL_STRONG) {
+      return {
+        status: 'implementation-escalation-required',
+        from: implementationModel,
+        to: MODEL_STRONG,
+        nextArgs: {
+          implementationModelOverride: MODEL_STRONG,
+          implementationEscalationReason: `${advice.reasoning}\n下一步：${advice.nextStep}`,
+        },
+        reason: 'Advisor 判断当前实现模型不适合继续；只升级 Implement model，不把整个 route 改成 CRITICAL。',
+        impl,
+        plan,
+        routing,
+        implementationAdvisor: implementationAdvisorSummary(),
+      }
+    }
+    return {
+      status: 'escalate',
+      at: 'Implement',
+      reason: '当前已是强实现模型，Advisor 仍要求升级，转人工/用户拍板',
+      impl,
+      plan,
+      routing,
+      implementationAdvisor: implementationAdvisorSummary(),
+    }
+  }
+
+  // continue / change-approach：下一轮仍由原实现模型执行，并把 advisorHistory 注入 prompt
+}
+
+if (!impl?.done) {
   return {
     status: 'escalate',
     at: 'Implement',
-    reason: impl ? (impl.notImplemented.join('；') || impl.honesty || '实现未标记完成') : 'implement agent 未返回',
-    notImplemented: impl?.notImplemented ?? [],
+    reason: 'Implement Advisor Loop 结束但实现仍未完成',
+    impl,
     plan,
     routing,
+    implementationAdvisor: implementationAdvisorSummary(),
   }
 }
 
@@ -833,6 +1096,7 @@ return {
   review,
   preflight: pre,
   impl,
+  implementationAdvisor: implementationAdvisorSummary(),
   verify,
   audit,
   commitResult,

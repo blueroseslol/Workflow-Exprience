@@ -142,6 +142,48 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 
 ---
 
+## 五·再补、Implement Advisor Escalation
+
+默认实现仍由路由派生模型负责；**HIGH 也不是自动问顾问**。只有实现者已经亲自读码/取证，并遇到无法安全继续的高风险疑难点时，才允许调用 `fable` 只读顾问。
+
+推荐链：
+
+```text
+Kimi/Sonnet Implement
+  → 普通问题自己解决
+  → 有证据的疑难点 → Fable Advisor
+  → continue/change-approach → Kimi 继续
+  → replan → 复用 replanFeedback/replanAttempt
+  → stop-and-ask → need-decision
+  → 多次仍不收敛 / escalate-implementation → 仅 Implement 升级 Opus
+```
+
+触发条件包括：合理修复后测试仍失败且根因不明、Plan 关键假设与源码冲突、需要越出 whitelist、新发现跨模块/API/schema/concurrency/lifecycle/state machine/persistence/serialization 风险、GitNexus 与 Plan 冲突、存在多个明显不同风险的实现方案。
+
+禁止用顾问处理普通编译/类型/格式问题。顾问默认：
+
+```js
+const ADVISOR_MODEL = args?.advisorModel ?? 'fable'
+const ADVISOR_MAX = args?.advisorMax ?? 3
+```
+
+顾问只输出 `continue / change-approach / replan / stop-and-ask / escalate-implementation`，**不修改代码**（模板里用 `disallowedTools: ['Edit', 'Write']` 硬约束）。代码 ownership 始终属于 Kimi/Opus。
+
+`advisorModel` 进缓存键：一次 run 中途切换它会让 Advisor 及其后所有 agent 重跑——预算内选定就不要中途换。
+
+顾问达到上限仍不收敛时，不继续烧 token：若当前是 Kimi，则早退 `implementation-escalation-required`，通过：
+
+```js
+nextArgs: {
+  implementationModelOverride: 'opus',
+  implementationEscalationReason: '...'
+}
+```
+
+同 session 用原 `scriptPath + resumeFromRunId` 续跑。因为模型/prompt 只在 Implement 开始发生变化，目标是让 Recon / Plan / Review / Preflight 尽量命中缓存，只重跑 Implement 及之后。已经是 Opus 仍无法收敛则转人工/用户拍板。
+
+---
+
 ## 六、Fail-safe：故障偏向质量
 
 Router 出问题时**绝不 fallback 到 LOW**：
