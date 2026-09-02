@@ -31,22 +31,52 @@
 
 ## 三、effort 门控真相 ⚠️
 
-从 CLI 二进制反查到的行为：
+从 CLI 二进制反查到的当前本机行为：
 
 | 组合 | 实际发生的事 |
 |---|---|
-| `haiku` + `effort: 'max'` | **空操作** —— 对 haiku 直接 return，effort 参数根本不发送 |
+| `haiku` + `effort: 'max'` | **可能为空操作** —— 当前逻辑 `haiku` 路径会直接 return，effort 参数不一定发送给 provider |
 | `sonnet` + `effort: 'xhigh'` | **静默降级为 high** —— denylist 含 sonnet-4-5 / 4-6 |
 | `opus` + `effort: 'high'` | 生效 |
 | `fable` + `effort: 'high'` | 生效（fable 的 capabilities 含 effort） |
 
-**全程无报错、无警告。** 你写了 `effort: 'max'`，UI 上看不出任何异常，但那个参数从未离开过本机。
+当前 `haiku + max` 路径可能**无报错、无警告**：如果 CLI 在本机先把 effort 吞掉，provider 根本看不到这个参数，因此也不会触发下面的兼容重试。这和“provider 明确返回不支持某个 effort 等级”是两种情况，不能混为一谈。
 
 语料佐证：46 个脚本里 `haiku + max` 出现 **0 次** —— 历史实践从未依赖它。
 
+### Haiku 类型模型的 effort 兼容阶梯
+
+当 `haiku` 别名被映射到第三方快速模型（例如 GLM-5.3-Flash），且本次 workflow **明确需要传 effort** 时，authoring / runner 按以下顺序尝试：
+
+```text
+max → xhigh → high
+```
+
+规则必须 fail-closed：
+
+1. 首次使用 `max`。
+2. **仅当 runtime / provider 明确返回“不支持该 effort / reasoning level / thinking capability”类错误**时，才改为 `xhigh` 重试。
+3. `xhigh` 仍得到同类 capability 错误，再改为 `high`。
+4. `high` 仍不支持时，**停止自动降级并提示用户**；让用户选择“省略 effort，使用该模型默认思考策略”或“换用支持 effort 的模型”。不得静默省略 effort，也不得擅自换模型。
+5. `agent() === null`、超时、schema 不匹配、鉴权失败、限流、网络错误、普通 4xx/5xx **都不是** effort capability 证据，不得因此走这条降级链。
+
+推荐在需要显式 effort 的模板里把它做成 args，而不是把某一级写死：
+
+```js
+const HAIKU_EFFORT = args?.haikuEffort ?? 'max'
+
+const result = await agent(prompt, {
+  model: 'haiku',
+  effort: HAIKU_EFFORT,
+  schema: SOME_SCHEMA,
+})
+```
+
+若收到明确的 effort capability 错误，主 agent 保持其他 args 不变，只把 `haikuEffort` 依次改为 `xhigh`、`high` 后重跑；能同 session resume 时优先复用原 run。`effort` 进入 agent cache key，因此改变它会让该 Haiku agent 及其后续链路 cache miss，这是预期行为。
+
 ### 那「让 haiku 验得更严」怎么实现？
 
-不要依赖无效 effort。使用本机取证型 schema：二元 verdict、退出码、测试计数、原始输出尾部、Preflight 基线对比。实例集中在 `schemas.md`，这里不重复 Workflow 的通用 schema contract。
+不要把 effort 当成唯一质量门。即使某个 provider 接受 `max/xhigh/high`，仍应使用本机取证型 schema：二元 verdict、退出码、测试计数、原始输出尾部、Preflight 基线对比。实例集中在 `schemas.md`，这里不重复 Workflow 的通用 schema contract。
 
 ### 如果确实需要 sonnet 的 xhigh
 
@@ -68,4 +98,4 @@ const ADVISOR_MODEL = args?.advisorModel ?? 'fable'   // 默认 fable，传 'opu
 
 ⚠️ **advisor agent 必须放调用链尾部或拆成独立 workflow** —— `model` 进缓存键，切换 `advisorModel` 会让该 agent **及其后所有 agent** 重跑。
 
-通用 effort 取值与继承规则直接查 `workflow-authoring`；本文件只维护上述本机异常。
+通用 effort 取值与继承规则直接查 `workflow-authoring`；本文件只维护上述本机异常与第三方 Haiku 兼容策略。

@@ -50,7 +50,9 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— 意图路
 | Implement | `sonnet` | `xhigh` | 读码 + 实现，**改前 Read、改后 Read 验证** |
 | Verify | `haiku` | — | 跑测试 + git commit + GitNexus |
 
-**effort 本机差异**：`haiku + max` 实测为空操作，`sonnet + xhigh` 会静默降级；不要靠 effort 表达“更严格”，改用退出码、测试计数、原始输出和基线对比。详见 `references/model-effort.md` / `references/schemas.md`。
+**effort 本机差异**：当前逻辑 `haiku + max` 可能在 CLI 层被直接吞掉，`sonnet + xhigh` 会静默降级；不要把 effort 当成唯一质量门，仍要用退出码、测试计数、原始输出和基线对比。
+
+**Haiku 类型模型兼容规则**：本次 workflow 明确需要传 effort 时，首试 `max`；仅在 runtime/provider **明确返回 effort/reasoning level/thinking capability 不支持**时，按 `max → xhigh → high` 依次重试。`high` 仍不支持就停止自动降级并提示用户选择“省略 effort 使用模型默认策略”或“换支持 effort 的模型”。`null`、超时、schema/鉴权/限流/网络错误不得误判为 capability mismatch，也不得静默省略 effort。详见 `references/model-effort.md` / `references/schemas.md`。
 
 **动态路由**见 `references/dynamic-routing.md`。**Codex 覆盖默认关闭**：Review/Audit 仍是 `fable`；只有用户明确要求时，authoring 阶段才按 `references/codex-cli.md` 改写本次 workflow。
 
