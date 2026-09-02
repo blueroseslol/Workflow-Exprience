@@ -69,8 +69,9 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 ```
 ├── .claude-plugin/          插件清单 + 本地 marketplace
 ├── skills/workflow-experience/
-│   ├── SKILL.md             ★ 常驻增量经验（原生 authoring contract 不复述；门禁 ≤5200）
+│   ├── SKILL.md             ★ 常驻增量经验（原生 authoring contract 不复述；门禁 ≤7000）
 │   └── references/          按需 Read，不常驻
+│       ├── openspec-first.md  OpenSpec-first 增量规划 / DecisionApply / PlanPatch ★
 │       ├── schemas.md         本机取证型 schema 实例 + 复用统计
 │       ├── prompt-openers.md  八类开场白原文
 │       ├── constraints.md     十类约束句式 + 命中率
@@ -79,6 +80,7 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 │       ├── dynamic-routing.md 动态模型路由 + GitNexus 复杂度评分（实验）
 │       ├── codex-cli.md        authoring-time Codex CLI 可选覆盖
 │       ├── resume-and-args.md 缓存键 / resume 限制 / 两级暂停（Resume vs Checkpoint）
+│       ├── peer-handoff.md    显式要求的跨会话定向回传协议
 │       └── pitfalls.md        十条踩坑记忆
 ├── templates/               可粘贴成品脚本（核心交付物）
 │   ├── four-phase.js          Plan→Review→Preflight→Implement→Verify（默认 baseline）
