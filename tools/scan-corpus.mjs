@@ -164,12 +164,15 @@ if (routed.length) {
     console.log(`  ${combo.padEnd(28)} n=${b.total} · completed ${pct100(b.completed, b.total)}`)
   }
 
-  // Implement Advisor：调用率、平均次数、调用后 completed、升级强实现模型比例
+  // Implement Advisor：调用率、平均次数、调用后 completed、请求升级强实现模型比例。
+  // 升级请求记在【发出请求的首次 run】（escalationRequested=true，早退时写入）——该 run calls>0，
+  // 落在 advised 集合内。不能用 escalatedToStrong 统计：那是【续跑生效后】的状态，续跑可能
+  // calls=0 被 advised 过滤，而首次 run escalatedToStrong=false —— 两头都漏，「已升级」会系统性偏低。
   const advised = routed.filter(r => (r.implementationAdvisor?.calls ?? 0) > 0)
   if (advised.length) {
     const advisorCalls = advised.reduce((n, r) => n + (r.implementationAdvisor?.calls ?? 0), 0)
     const advisorCompleted = advised.filter(r => r.status === 'completed').length
-    const advisorEscalated = advised.filter(r => r.implementationAdvisor?.escalatedToStrong).length
+    const advisorEscalationRequested = advised.filter(r => r.implementationAdvisor?.escalationRequested).length
     const byAdvisorRoute = {}
     for (const r of advised) {
       const k = r.routing.route
@@ -177,7 +180,7 @@ if (routed.length) {
     }
     console.log('\nImplement Advisor：')
     console.log(`  调用率 ${pct100(advised.length, routed.length)}（${advised.length}/${routed.length}）`)
-    console.log(`  平均 calls ${(advisorCalls / advised.length).toFixed(2)} · 调用后 completed ${pct100(advisorCompleted, advised.length)} · 已升级强实现模型 ${pct100(advisorEscalated, advised.length)}`)
+    console.log(`  平均 calls ${(advisorCalls / advised.length).toFixed(2)} · 调用后 completed ${pct100(advisorCompleted, advised.length)} · 请求升级强实现模型 ${pct100(advisorEscalationRequested, advised.length)}`)
     console.log(`  route 分布：${Object.entries(byAdvisorRoute).map(([k, v]) => `${k}=${v}`).join('  ')}`)
   }
 

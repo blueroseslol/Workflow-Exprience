@@ -742,6 +742,11 @@ phase('Implement')
 let impl = null
 let advisorCalls = 0
 const advisorHistory = []
+// 首次 early-return 请求升级强实现模型时置 true（进遥测）。
+// 不能用 escalatedToStrong 统计「请求升级」：那是【续跑生效后】的状态——首次 run
+// calls>0 但 escalatedToStrong=false，续跑 escalatedToStrong=true 却可能 calls=0
+// 被 advised=calls>0 过滤，两头都漏 → 升级统计系统性偏低。请求必须记在发出请求的首次 run 上。
+let escalationRequested = false
 
 const implementationAdvisorSummary = () => ({
   model: ADVISOR_MODEL,
@@ -749,6 +754,7 @@ const implementationAdvisorSummary = () => ({
   outcomes: advisorHistory,
   implementationModel,
   escalatedToStrong: IMPLEMENTATION_MODEL_OVERRIDE === MODEL_STRONG,
+  escalationRequested,
 })
 
 for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt++) {
@@ -838,6 +844,7 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
 
   if (advisorCalls >= ADVISOR_MAX) {
     if (implementationModel !== MODEL_STRONG) {
+      escalationRequested = true
       return {
         status: 'implementation-escalation-required',
         from: implementationModel,
@@ -965,6 +972,7 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
 
   if (advice.verdict === 'escalate-implementation') {
     if (implementationModel !== MODEL_STRONG) {
+      escalationRequested = true
       return {
         status: 'implementation-escalation-required',
         from: implementationModel,

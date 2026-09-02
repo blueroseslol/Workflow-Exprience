@@ -232,6 +232,9 @@ routing: {
 - 平均 complexity score
 - routeMiss 率
 - forced escalation 率
+- Implement Advisor：调用率、平均 calls、调用后 completed 率、**请求升级强实现模型比例**（`implementationAdvisor.escalationRequested`）
+
+> ⚠️ Advisor 升级统计口径：`escalationRequested` 记在【发出请求的首次 run】（`implementation-escalation-required` 早退时写入），该 run `calls>0` 一定落在 `advised` 集合内。不能用 `escalatedToStrong` 当升级率——它是【续跑生效后】的状态：首次 run `calls>0` 但 `escalatedToStrong=false`，带 override 的续跑 `escalatedToStrong=true` 却可能一次 Advisor 都不调用（`calls=0`）被 `advised = calls>0` 过滤，两头都漏 → 「已升级」统计系统性偏低甚至恒 0。
 
 跑 `node tools/scan-corpus.mjs` 即可看到「路由遥测」段（语料里还没有 routing 字段时自动跳过）。
 
