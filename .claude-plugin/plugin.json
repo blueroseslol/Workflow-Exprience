@@ -1,6 +1,6 @@
 {
   "name": "workflow-experience",
-  "version": "0.4.0",
-  "description": "Ultracode workflow 经验库：OpenSpec-first 增量规划 + GitNexus 动态路由 + 持久 Plan/Review 语义缓存 + 运行固化与跨会话进度",
+  "version": "0.4.1",
+  "description": "Ultracode workflow 经验库：OpenSpec-first 增量规划 + GitNexus 动态路由 + 持久 Plan/Review 语义缓存（v0.4.1 加固）+ 运行固化与跨会话进度",
   "author": { "name": "loujiajie" }
 }

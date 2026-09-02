@@ -50,9 +50,14 @@ const STATE_COMPATIBLE = !!(
   PRIOR_STATE.cacheVersion === CHECKPOINT_CACHE_VERSION &&
   PRIOR_STATE.checkpointKey === CHECKPOINT_KEY
 )
-const TRUSTED_ARTIFACT_REUSE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && CHECKPOINT_VALIDATION?.valid === true)
+// dirtyWorktree：上轮实现已动 workspace 但 Verify 未绿。fingerprint 对着 partial workspace
+// 计算所以仍 valid，但 Reviewer 从未审过这份代码 —— 与 legacy 一样必须先廉价验证。
+const PRIOR_DIRTY = !!(PRIOR_STATE?.dirtyWorktree === true || CHECKPOINT_VALIDATION?.dirtyWorktree === true)
+const TRUSTED_ARTIFACT_REUSE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && !PRIOR_DIRTY && CHECKPOINT_VALIDATION?.valid === true)
 const LEGACY_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && PRIOR_STATE?.legacyUnverified && CHECKPOINT_VALIDATION?.legacyUnverified === true)
-const ARTIFACT_REUSE = TRUSTED_ARTIFACT_REUSE || LEGACY_ARTIFACT_CANDIDATE
+const DIRTY_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && PRIOR_DIRTY && CHECKPOINT_VALIDATION?.valid === true)
+const NEEDS_CHECKPOINT_VALIDATE = LEGACY_ARTIFACT_CANDIDATE || DIRTY_ARTIFACT_CANDIDATE
+const ARTIFACT_REUSE = TRUSTED_ARTIFACT_REUSE || NEEDS_CHECKPOINT_VALIDATE
 
 const MODEL_RECON = args?.reconModel ?? 'haiku'
 const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet' // 本机 Kimi K3
@@ -130,6 +135,7 @@ const PLAN_SCHEMA = {
   properties:{
     verdict:{type:'string',enum:['implementable','blocked']}, sourceMode:{type:'string',enum:['openspec-reuse','openspec-repair']}, executionBasis:{type:'string'},
     slices:{type:'array',items:SLICE_SCHEMA}, whitelist:S_STR_ARR, mustNotTouch:S_STR_ARR, testCommands:S_STR_ARR,
+    evidenceDependencies:{...S_STR_ARR,description:'验证过但不直接修改的 caller/public contract/接口/关键测试文件，用于缓存失效判定'},
     predictedImpact:IMPACT_SCHEMA, decisionPoints:{type:'array',items:DECISION_SCHEMA}, openspecEdits:{type:'array',items:EDIT_SCHEMA},
   },
 }
@@ -211,28 +217,30 @@ const plannerModel=needsStrongPlan?MODEL_STRONG:MODEL_DEFAULT
 const implementationModel=routing.route==='CRITICAL'?MODEL_STRONG:MODEL_DEFAULT
 log(`OpenSpec coverage=${recon?.openspec?.coverage??'?'} drift=${recon?.openspec?.drift??'?'} route=${routing.route} planner=${plannerModel}`)
 
-// v0.3 历史 raw 没有生成时刻 fingerprint。不能把“今天回填的 hash”当成历史真实性；
-// 跨 session 时只允许先用廉价 Recon 模型验证旧 Plan/Review，再决定是否跳过昂贵模型。
-let legacyValidation=null
-if(LEGACY_ARTIFACT_CANDIDATE&&PRIOR_STATE?.basePlan){
+// v0.3 历史 raw 没有生成时刻 fingerprint；dirtyWorktree（上轮实现未完成或 Verify 未绿）的
+// fingerprint 虽匹配，但 Plan/Review 从未对着这份 partial workspace 审过。两者都不能把
+// 「今天的 hash」当成历史真实性：先用廉价模型验证旧 Plan/Review，再决定是否跳过昂贵模型。
+let priorValidation=null
+if(NEEDS_CHECKPOINT_VALIDATE&&PRIOR_STATE?.basePlan){
   phase('Recon')
-  legacyValidation=await agent([
+  priorValidation=await agent([
     '你是 CheckpointValidate（廉价只读验证器），不是 Planner。判断历史 Plan/Review 是否仍适用于当前 OpenSpec 与代码。',
     `当前任务=${TASK}; change=${CHANGE_DIR}; milestone=${MILESTONE}; route=${routing.route}`,
     `历史 BasePlan:
 ${digest(PRIOR_STATE.basePlan)}`,
     PRIOR_STATE?.review?`历史 Review verdict=${PRIOR_STATE.review.verdict}`:'历史 Review 缺失',
+    PRIOR_DIRTY?'上轮实现未完成或 Verify 未绿（dirtyWorktree）：除 OpenSpec/代码漂移外，还必须核实已写入 workspace 的部分实现不推翻 Plan/Review 结论；无法核实即 false。':'',
     '必须亲自定向 Read 当前 proposal/design/tasks/specs，并 Read 历史 slices/whitelist 涉及的代码；可用刚完成的 Recon/GitNexus 结果导航，但不得只信历史摘要。',
     'planStillValid=true 仅当根因/切片/whitelist/tests/contract 仍成立；reviewStillValid=true 还要求历史 verdict=approve 且没有出现会推翻该审阅的新依赖/风险。',
     '任一关键文件无法核实、OpenSpec 语义变化、caller/contract 漂移时对应值必须 false；changedSliceIds 列受影响 slice。',K_FILE_LINE,
-  ].join('\n'),{label:'checkpoint:validate',phase:'Recon',model:MODEL_RECON,schema:CHECKPOINT_VALIDATE_SCHEMA})
-  if(!legacyValidation)log('CheckpointValidate 未返回：fail-closed，不复用历史 Plan/Review')
-  else log(`Legacy checkpoint validate：plan=${legacyValidation.planStillValid} review=${legacyValidation.reviewStillValid}`)
+  ].filter(Boolean).join('\n'),{label:'checkpoint:validate',phase:'Recon',model:MODEL_RECON,schema:CHECKPOINT_VALIDATE_SCHEMA})
+  if(!priorValidation)log('CheckpointValidate 未返回：fail-closed，不复用历史 Plan/Review')
+  else log(`CheckpointValidate${PRIOR_DIRTY?'（dirty）':''}：plan=${priorValidation.planStillValid} review=${priorValidation.reviewStillValid}`)
 }
 
 // ★ DECISIONS 绝不进入 BasePlan prompt：拍板后 same-session resume 可让 BasePlan HIT；跨 run 可走 artifact hit。
 const priorRoute=PRIOR_STATE?.routing?.effectiveRoute??PRIOR_STATE?.routing?.route??null
-const basePlanArtifactHit=!!(ARTIFACT_REUSE&&PRIOR_STATE?.basePlan&&(TRUSTED_ARTIFACT_REUSE||legacyValidation?.planStillValid===true)&&(!priorRoute||ROUTE_RANK[priorRoute]>=ROUTE_RANK[routing.route]))
+const basePlanArtifactHit=!!(ARTIFACT_REUSE&&PRIOR_STATE?.basePlan&&(TRUSTED_ARTIFACT_REUSE||priorValidation?.planStillValid===true)&&(!priorRoute||ROUTE_RANK[priorRoute]>=ROUTE_RANK[routing.route]))
 phase('Plan')
 const basePlan=basePlanArtifactHit ? PRIOR_STATE.basePlan : await agent([
   `你是 ${MILESTONE} 的执行规划者。OpenSpec 是上游 Plan IR；只做 execution overlay，不从零复述/重写。`,
@@ -240,6 +248,7 @@ const basePlan=basePlanArtifactHit ? PRIOR_STATE.basePlan : await agent([
   `Recon：route=${routing.route}; coverage=${recon?.openspec?.coverage??'?'}; drift=${recon?.openspec?.drift??'?'}; archGap=${recon?.openspec?.architectureGap??'?'}`,
   `相关 tasks=${recon?.openspec?.relevantTaskIds?.join(', ')||'自行定向读取'}`,
   '每个 slice 必须有稳定 id + sourceTaskIds + files + tests/理由。需要用户拍板时写 decisionPoints；每个 option 预编码 activate/disable slices、whitelist/tests 增量。',
+  'evidenceDependencies 填你 Read/验证过但不直接修改的 caller/public contract/接口/关键测试文件路径（缓存失效判定用，宁多勿漏；无则空数组）。',
   'requiresArchitect 仅在选项改变架构/public API/schema/cross-repo contract/concurrency/state ownership/persistence/migration/security 时 true。',
   'OpenSpec 机械补洞列 openspecEdits semantic=false, decisionId=""。任何 semantic=true edit 必须同时给 decisionPoint，并把 decisionId 指向它；不得自行批准语义变化。',
   K_FILE_LINE,
@@ -250,10 +259,10 @@ if(basePlan.verdict==='blocked')return{status:'blocked',at:'BasePlan',plan:baseP
 
 const applied=applyDecisions(basePlan,DECISIONS)
 if(applied.invalid.length)return{status:'blocked',at:'DecisionApply',invalid:applied.invalid,plan:basePlan,routing}
-if(applied.unresolved.length)return{status:'need-decision',at:'DecisionApply',milestone:MILESTONE,decisionPoints:applied.unresolved,checkpoint:CHECKPOINT_META,recon,basePlan,plan:basePlan,routing,howToResume:'同 session 优先原 scriptPath + resumeFromRunId；跨 run/session 由 state fingerprint 验证后传 priorState/checkpointValidation/checkpointKey，BasePlan 可 ARTIFACT HIT。'}
+if(applied.unresolved.length)return{status:'need-decision',at:'DecisionApply',milestone:MILESTONE,decisionPoints:applied.unresolved,checkpoint:CHECKPOINT_META,recon,basePlan,plan:basePlan,routing,howToResume:'同 session 优先原 scriptPath + resumeFromRunId（args=首轮全量叠加 decisions，全量替换非合并）；跨 run/session 由 state fingerprint 验证后传 priorState/checkpointValidation/checkpointKey，BasePlan 可 ARTIFACT HIT。'}
 const sameDecisions=ARTIFACT_REUSE&&decisionKey(PRIOR_STATE?.decisionApply?.decisions)===decisionKey(DECISIONS)
 const priorApprovedRoute=PRIOR_STATE?.routing?.effectiveRoute??PRIOR_STATE?.routing?.route??null
-const effectivePlanArtifactHit=!!(basePlanArtifactHit&&sameDecisions&&PRIOR_STATE?.review?.verdict==='approve'&&PRIOR_STATE?.effectivePlan&&(TRUSTED_ARTIFACT_REUSE||legacyValidation?.reviewStillValid===true)&&(!priorApprovedRoute||ROUTE_RANK[priorApprovedRoute]>=ROUTE_RANK[routing.route]))
+const effectivePlanArtifactHit=!!(basePlanArtifactHit&&sameDecisions&&PRIOR_STATE?.review?.verdict==='approve'&&PRIOR_STATE?.effectivePlan&&(TRUSTED_ARTIFACT_REUSE||priorValidation?.reviewStillValid===true)&&(!priorApprovedRoute||ROUTE_RANK[priorApprovedRoute]>=ROUTE_RANK[routing.route]))
 let plan=effectivePlanArtifactHit?PRIOR_STATE.effectivePlan:applied.plan
 if(effectivePlanArtifactHit)log('EffectivePlan ARTIFACT HIT：decisions 未变，复用上轮已批准 PlanPatch/PlanDelta 结果')
 
@@ -360,4 +369,4 @@ if(commitExpected){
 }
 const commitSucceeded=commitResult?.committed===true&&(commitResult?.commits?.length??0)>0
 const finalStatus=audit?.verdict==='needs-rework'?'needs-rework':audit?.verdict==='escalate-to-human'?'escalate-to-human':commitExpected&&!commitSucceeded?'commit-failed':verify?.status??'unknown'
-return{status:finalStatus,milestone:MILESTONE,ts:TS,checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,decisionApply:{decisions:DECISIONS,architectChoices:applied.architect.map(x=>({id:x.decision.id,label:x.option.label}))},review,patchRounds,specSync,preflight:pre,impl,verify,audit,commitResult,artifactCache:{enabled:ARTIFACT_REUSE,legacyValidated:LEGACY_ARTIFACT_CANDIDATE?legacyValidation:null,reconHit:TRUSTED_ARTIFACT_REUSE&&!!PRIOR_STATE?.recon,basePlanHit:basePlanArtifactHit,effectivePlanHit:effectivePlanArtifactHit,reviewHit:reviewArtifactHit},routing:{...routing,effectiveRoute,plannerModel,implementationModel,reviewModel:MODEL_REVIEW,routeMiss},broadcast:`[${MILESTONE}] OpenSpec-first · route=${effectiveRoute} · planner=${plannerModel} · cache=${reviewArtifactHit?'review-hit':basePlanArtifactHit?'plan-hit':'miss'} · patches=${patchRounds} · ${finalStatus}`}
+return{status:finalStatus,milestone:MILESTONE,ts:TS,checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,decisionApply:{decisions:DECISIONS,architectChoices:applied.architect.map(x=>({id:x.decision.id,label:x.option.label}))},review,patchRounds,specSync,preflight:pre,impl,verify,audit,commitResult,artifactCache:{enabled:ARTIFACT_REUSE,dirty:PRIOR_DIRTY,checkpointValidated:NEEDS_CHECKPOINT_VALIDATE?priorValidation:null,reconHit:TRUSTED_ARTIFACT_REUSE&&!!PRIOR_STATE?.recon,basePlanHit:basePlanArtifactHit,effectivePlanHit:effectivePlanArtifactHit,reviewHit:reviewArtifactHit},routing:{...routing,effectiveRoute,plannerModel,implementationModel,reviewModel:MODEL_REVIEW,routeMiss},broadcast:`[${MILESTONE}] OpenSpec-first · route=${effectiveRoute} · planner=${plannerModel} · cache=${reviewArtifactHit?(NEEDS_CHECKPOINT_VALIDATE?'review-validated':'review-hit'):basePlanArtifactHit?(NEEDS_CHECKPOINT_VALIDATE?'plan-validated':'plan-hit'):'miss'} · patches=${patchRounds} · ${finalStatus}`}

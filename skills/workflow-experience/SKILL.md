@@ -38,7 +38,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 - OpenSpec-first 用户拍板：同 session resume + `args.decisions`；BasePlan prompt 不含 decisions，因此 BasePlan 应命中；普通选择由 JS Apply，架构选择才跑 Opus PlanDelta；
 - `need-decision` 跨 session：Git 中最新 OpenSpec artifacts 是第一 planning checkpoint，再辅以 `docs/ultracode/raw/` 与 `.claude/progress/*.jsonl`。
 
-**持久语义缓存 v0.4**：hook 注入 `[Ultracode checkpoint resolver]` 先判候选再 author：`nativeResume=true` 用原 `scriptPath + resumeFromRunId`；`valid=true` → Read state 传 `priorState/checkpointKey/checkpointValidation` 走 ARTIFACT HIT；`legacy=true` 禁直接 hit，跨 session 先 haiku CheckpointValidate；`valid=false` 禁复用。
+**持久语义缓存 v0.4.1**：hook 注入 `[Ultracode checkpoint resolver]` 先判候选：`nativeResume=true` 用原 `scriptPath+resumeFromRunId`+`resumeArgs` 全量；`valid=true` → Read state 传 `priorState/checkpointKey/checkpointValidation` 走 ARTIFACT HIT；`dirty`/`legacy` 禁直接 hit，先 haiku CheckpointValidate；`valid=false` 禁复用。
 
 ## 索引（按需 Read）
 

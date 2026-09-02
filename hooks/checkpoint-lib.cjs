@@ -4,6 +4,7 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const os = require('os')
 
 const STATE_SCHEMA_VERSION = 1
 const MAX_STATE_FILES = 50
@@ -108,6 +109,11 @@ function resolveStoredPath(cwd, p) {
   return path.isAbsolute(p) ? path.normalize(p) : path.resolve(cwd, p)
 }
 
+function isUnderDir(abs, dirAbs) {
+  const rel = path.relative(dirAbs, abs)
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
 function walkMarkdown(root, out = []) {
   let entries
   try {
@@ -163,17 +169,45 @@ function diffFingerprint(oldFp, newFp) {
   return changed.sort()
 }
 
-function validateState(cwd, state) {
+// resolver 热路径缓存：同一 changeDir 的 markdown tree / 同一代码文件只重算一次 hash。
+// UserPromptSubmit hook 只有 5 秒预算，不能对每个候选 state 重复全量 hash。
+function fingerprintMarkdownTreeCached(cwd, roots, cache) {
+  if (!cache) return fingerprintMarkdownTree(cwd, roots)
+  const key = [...(roots || [])].sort().join('\n')
+  if (!cache.md.has(key)) cache.md.set(key, fingerprintMarkdownTree(cwd, roots))
+  return cache.md.get(key)
+}
+
+function fingerprintExactFilesCached(cwd, paths, cache) {
+  if (!cache) return fingerprintExactFiles(cwd, paths)
+  const uniq = [...new Set((paths || []).filter(Boolean).map(p => storedPath(cwd, p)).filter(Boolean))].sort()
+  const files = uniq.map(p => {
+    if (!cache.file.has(p)) cache.file.set(p, fileEntry(cwd, p))
+    return cache.file.get(p)
+  })
+  return { kind: 'exact-files', digest: digestEntries(files), files }
+}
+
+function validateState(cwd, state, cache = null) {
   if (state?.legacyUnverified) {
     return { valid: false, sourceValid: false, codeValid: false, legacyUnverified: true, changedPaths: ['<legacy-unverified>'] }
   }
   if (!state?.fingerprint) return { valid: false, sourceValid: false, codeValid: false, legacyUnverified: false, changedPaths: ['<missing-fingerprint>'] }
   const oldSource = state.fingerprint.source
+  const oldExtra = state.fingerprint.sourceExtra
   const oldCode = state.fingerprint.code
-  const sourceNow = fingerprintMarkdownTree(cwd, oldSource?.roots || [])
-  const codePaths = (oldCode?.files || []).map(e => e.path)
-  const codeNow = fingerprintExactFiles(cwd, codePaths)
-  const sourceValid = !!oldSource && oldSource.digest === sourceNow.digest
+  const sourceNow = fingerprintMarkdownTreeCached(cwd, oldSource?.roots || [], cache)
+  const codeNow = fingerprintExactFilesCached(cwd, (oldCode?.files || []).map(e => e.path), cache)
+  // sourceExtra：changeDir 之外的自定义 proposal/design/tasks/plan 文档（v0.4.1+）。
+  // 旧 state 没有该字段时跳过，不因此判失效。
+  let extraValid = true
+  let extraChanged = []
+  if (oldExtra) {
+    const extraNow = fingerprintExactFilesCached(cwd, (oldExtra.files || []).map(e => e.path), cache)
+    extraValid = oldExtra.digest === extraNow.digest
+    extraChanged = diffFingerprint(oldExtra, extraNow)
+  }
+  const sourceValid = !!oldSource && oldSource.digest === sourceNow.digest && extraValid
   const codeValid = !!oldCode && oldCode.digest === codeNow.digest
   return {
     valid: sourceValid && codeValid,
@@ -182,15 +216,20 @@ function validateState(cwd, state) {
     legacyUnverified: false,
     changedPaths: [...new Set([
       ...diffFingerprint(oldSource, sourceNow),
+      ...extraChanged,
       ...diffFingerprint(oldCode, codeNow),
     ])].sort(),
   }
 }
 
+// fingerprint 覆盖的不只是「将被修改」的文件：mustNotTouch / evidenceDependencies
+// （caller、public contract、关键测试）变化同样会推翻 Plan/Review 的证据基础。
 function collectPlanCodePaths(...plans) {
   const out = []
   for (const plan of plans) {
     for (const p of plan?.whitelist ?? []) out.push(p)
+    for (const p of plan?.mustNotTouch ?? []) out.push(p)
+    for (const p of plan?.evidenceDependencies ?? []) out.push(p)
     for (const s of plan?.slices ?? []) for (const p of s?.files ?? []) out.push(p)
   }
   return [...new Set(out.filter(p => typeof p === 'string' && p && !rejectPlaceholder(p)))]
@@ -234,7 +273,7 @@ function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = fals
   try {
     const inferred = inferCheckpoint(run, cwd)
     if (!inferred) return null
-    const { result, changeDir, milestone, task, checkpointKey, cacheVersion } = inferred
+    const { result, runArgs, changeDir, milestone, task, checkpointKey, cacheVersion } = inferred
     const specSyncDone = result.specSync?.done === true
     const rawBasePlan = result.basePlan || (result.at === 'DecisionApply' ? result.plan : null) || result.plan || null
     const rawEffectivePlan = result.effectivePlan || result.plan || rawBasePlan
@@ -243,7 +282,28 @@ function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = fals
     const basePlan = sanitizePlan(rawBasePlan, specSyncDone)
     const effectivePlan = sanitizePlan(rawEffectivePlan, specSyncDone)
     const source = fingerprintMarkdownTree(cwd, [changeDir])
+    // 项目自定义 proposal/design/tasks/plan 文档可能位于 changeDir 之外（args.*Doc 显式覆盖）；
+    // 它们同样是 Plan 的证据基础，必须进入 fingerprint，否则改了也不会失效。
+    const changeDirAbs = resolveProjectPath(cwd, changeDir)
+    const extraSourceDocs = [...new Set(
+      [runArgs.proposalDoc, runArgs.designDoc, runArgs.tasksDoc, runArgs.planDoc]
+        .filter(p => typeof p === 'string' && p && !rejectPlaceholder(p))
+        .map(p => resolveProjectPath(cwd, p))
+        .filter(abs => abs && changeDirAbs && !isUnderDir(abs, changeDirAbs))
+    )]
+    const sourceExtra = extraSourceDocs.length ? fingerprintExactFiles(cwd, extraSourceDocs) : null
     const code = fingerprintExactFiles(cwd, collectPlanCodePaths(rawBasePlan, rawEffectivePlan))
+    // resume 的 args 是全量替换不是合并：必须保存首轮完整 args，否则 native resume 时
+    // 脚本回退 <占位> 默认值 → prompt/route/model 变化 → Plan 及以后粘滞 miss。
+    // priorState/checkpointValidation 是恢复通道自身的载体，递归保存会让 state 逐代膨胀。
+    const resumeArgs = cloneJson(runArgs) || {}
+    delete resumeArgs.priorState
+    delete resumeArgs.checkpointValidation
+    // 实现已执行但 Verify 未绿（失败/escalate/中途 Stop）：fingerprint 对着 partial workspace
+    // 计算，而 Reviewer 从未审过这份代码。标 dirty，禁止直接 Plan/Review ARTIFACT HIT。
+    const reachedImplementation = !!(result.impl || result.verify || result.audit || result.commitResult
+      || ['Implement', 'Verify', 'Audit', 'Commit'].includes(result.at))
+    const dirtyWorktree = reachedImplementation && result.verify?.status !== 'green'
     const state = {
       schemaVersion: STATE_SCHEMA_VERSION,
       cacheVersion,
@@ -259,6 +319,9 @@ function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = fals
       task,
       changeDir: storedPath(cwd, changeDir),
       milestone,
+      resumeArgs,
+      dirtyWorktree,
+      reviewReusable: !dirtyWorktree,
       recon: cloneJson(result.recon),
       basePlan,
       effectivePlan,
@@ -269,7 +332,7 @@ function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = fals
       specSyncDone,
       legacyUnverified: !!legacyUnverified,
       appliedOpenSpecEdits: specSyncDone ? cloneJson(rawEffectivePlan.openspecEdits || []) : [],
-      fingerprint: { source, code },
+      fingerprint: { source, sourceExtra, code },
     }
 
     const statePath = statePathForKey(cwd, checkpointKey)
@@ -351,14 +414,49 @@ function tokenScore(requirement, state) {
   return score
 }
 
-function nativeResumeCheck(cwd, sessionId, state) {
-  if (!sessionId || state.sessionId !== sessionId || !state.scriptPath || !state.scriptSha1) return false
-  const p = resolveProjectPath(cwd, state.scriptPath)
+function projectsDir() {
+  // env 覆盖主要给测试用；生产默认 ~/.claude/projects
+  return process.env.ULTRACODE_PROJECTS_DIR || path.join(os.homedir(), '.claude', 'projects')
+}
+
+// 原生 resume 的真正计算缓存是 journal.jsonl。session/script 匹配但 journal 缺失
+// （插件重装、缓存清理、旧 session 数据残缺）时 resume 会静默返回空缓存然后全量重跑 ——
+// 这种情况必须回落 Semantic Artifact Restore，而不是谎报 nativeResumeEligible。
+function journalExists(sessionId, runId) {
+  if (!sessionId || !runId) return false
+  const projects = projectsDir()
+  let dirs
   try {
-    return sha1(fs.readFileSync(p, 'utf8')) === state.scriptSha1
+    dirs = fs.readdirSync(projects, { withFileTypes: true })
   } catch {
     return false
   }
+  for (const d of dirs) {
+    if (!d.isDirectory()) continue
+    try {
+      if (fs.statSync(path.join(projects, d.name, sessionId, 'subagents', 'workflows', runId, 'journal.jsonl')).isFile()) return true
+    } catch { /* next */ }
+  }
+  return false
+}
+
+function nativeResumeCheck(cwd, sessionId, state) {
+  if (!sessionId || state.sessionId !== sessionId || !state.scriptPath || !state.scriptSha1 || !state.runId) return false
+  const p = resolveProjectPath(cwd, state.scriptPath)
+  try {
+    if (sha1(fs.readFileSync(p, 'utf8')) !== state.scriptSha1) return false
+  } catch {
+    return false
+  }
+  return journalExists(sessionId, state.runId)
+}
+
+// v0.4.0 的 state 没有 dirtyWorktree 字段；用终态 status 兜底推断
+// （实现后未 Verify green 即视为 dirty，宁可多走一次廉价 CheckpointValidate）。
+const DIRTY_STATUSES = new Set(['red', 'needs-rework', 'commit-failed', 'escalate-to-human', 'unknown', 'failed', 'escalate'])
+function stateDirtyWorktree(state) {
+  if (state?.dirtyWorktree != null) return state.dirtyWorktree === true
+  return DIRTY_STATUSES.has(state?.workflowStatus)
 }
 
 function resolveCheckpointCandidates({ cwd, sessionId = null, requirement = '', limit = 3 }) {
@@ -374,13 +472,21 @@ function resolveCheckpointCandidates({ cwd, sessionId = null, requirement = '', 
     return []
   }
 
-  const candidates = []
+  // 先只读 JSON + tokenScore 排序，再对 top-N 做昂贵的 fingerprint 重算；
+  // 同一 changeDir / 代码文件的 hash 在候选间 memoize。
+  const scored = []
   for (const x of files) {
     const p = path.join(stateDir, x.f)
     const state = readJson(p)
     if (!state || state.kind !== 'ultracode-semantic-state' || state.schemaVersion !== STATE_SCHEMA_VERSION) continue
-    const validation = validateState(cwd, state)
-    candidates.push({
+    scored.push({ p, state, mtime: x.mtime, score: tokenScore(requirement, state) })
+  }
+  scored.sort((a, b) => b.score - a.score || b.mtime - a.mtime)
+
+  const cache = { md: new Map(), file: new Map() }
+  return scored.slice(0, Math.max(1, Math.min(limit, 5))).map(({ p, state, mtime, score }) => {
+    const dirty = stateDirtyWorktree(state)
+    return {
       path: storedPath(cwd, p),
       checkpointKey: state.checkpointKey,
       changeDir: state.changeDir,
@@ -393,15 +499,14 @@ function resolveCheckpointCandidates({ cwd, sessionId = null, requirement = '', 
       sessionId: state.sessionId,
       cacheVersion: state.cacheVersion,
       legacyUnverified: !!state.legacyUnverified,
-      validation,
+      dirtyWorktree: dirty,
+      reviewReusable: !dirty,
+      validation: validateState(cwd, state, cache),
       nativeResumeEligible: nativeResumeCheck(cwd, sessionId, state),
-      score: tokenScore(requirement, state),
-      mtime: x.mtime,
-    })
-  }
-
-  candidates.sort((a, b) => b.score - a.score || b.mtime - a.mtime)
-  return candidates.slice(0, Math.max(1, Math.min(limit, 5)))
+      score,
+      mtime,
+    }
+  })
 }
 
 module.exports = {
@@ -410,4 +515,5 @@ module.exports = {
   backfillStates,
   resolveCheckpointCandidates,
   validateState,
+  journalExists,
 }

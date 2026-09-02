@@ -120,3 +120,13 @@ OpenSpec-first 的长期 Plan IR 与 Ultracode 的计算缓存正式分层：
 - Runtime Resume：同 session 的计算缓存；
 - Semantic State：跨 run / 跨 session 的 LLM 结果缓存；
 - raw snapshot：不可变历史与遥测。
+
+## v0.4.1 修订（2026-09-02）
+
+审阅发现四个可靠性问题与一处性能风险，本修订在原有分层上加固，不改变架构：
+
+1. **resumeArgs 持久化**：resume 的 args 是全量替换不是合并。state 新增 `resumeArgs`（剥离 `priorState`/`checkpointValidation` 防递归膨胀）；native resume 必须 `args = { ...state.resumeArgs, ...新args }`，否则脚本回退占位默认值 → prompt/route/model 变化 → Plan 及以后粘滞 miss。
+2. **journal 存在性核实**：`nativeResumeEligible` 原来只查 session + script hash；但真正的计算缓存是 `subagents/workflows/<runId>/journal.jsonl`，缺失时原生 resume 会静默返回空缓存并全量重跑。现在 journal 不存在 → `nativeResume=false` → 回落 Artifact Restore（更便宜且可靠）。
+3. **dirtyWorktree 门控**：实现已执行但 Verify 未绿（failed/escalate/red）时，fingerprint 是对 partial workspace 算的，Reviewer 从未审过这份代码。state 标 `dirtyWorktree` / `reviewReusable`；dirty 候选与 legacy 一样禁止直接 Plan/Review HIT，先廉价 CheckpointValidate。旧 v0.4.0 state 缺字段时按终态 status 兜底推断。
+4. **fingerprint 覆盖扩大**：代码侧加入 `mustNotTouch` + `evidenceDependencies`（PLAN_SCHEMA 新可选字段，Planner 显式列出 caller/public contract/关键测试——B.ts caller 漂移现在会让旧 Review 失效）；source 侧加入 changeDir 之外由 `args.proposalDoc/designDoc/tasksDoc/planDoc` 显式指定的自定义文档（`fingerprint.sourceExtra`）。
+5. **resolver 性能**：`resolveCheckpointCandidates` 先 tokenScore 排序、只对 top-N 重算 fingerprint，并按 changeDir/文件 memoize hash——不再对 50 个 state 全量 hash，避免顶爆 UserPromptSubmit 的 5 秒预算导致 checkpointContext 整体丢失。

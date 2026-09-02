@@ -49,15 +49,17 @@ function main() {
     const rows = candidates.map((c, i) => {
       const changed = c.validation.changedPaths.slice(0, 5).join(',') || '-'
       return `#${i + 1} path=${c.path} key=${c.checkpointKey} change=${c.changeDir} milestone=${c.milestone} ` +
-        `valid=${c.validation.valid} legacy=${c.legacyUnverified} nativeResume=${c.nativeResumeEligible} runId=${c.runId || '-'} ` +
+        `valid=${c.validation.valid} legacy=${c.legacyUnverified} dirty=${c.dirtyWorktree} nativeResume=${c.nativeResumeEligible} runId=${c.runId || '-'} ` +
         `scriptPath=${c.scriptPath || '-'} changed=${changed}`
     })
     checkpointContext =
       '\n[Ultracode checkpoint resolver] 发现历史语义 checkpoint 候选：\n' + rows.join('\n') +
       '\n恢复规则：只使用与本需求 change/milestone/task 明确匹配的候选。' +
-      '若 nativeResume=true，必须优先使用该候选的原 scriptPath + resumeFromRunId，禁止重新 author 脚本；' +
+      '若 nativeResume=true（同 session+脚本 hash 一致+journal 已核实存在），必须优先原生 resume：用该候选 scriptPath + resumeFromRunId，' +
+      'args 必须 Read state JSON 取 resumeArgs 全量叠加本轮新 args（resume args 是全量替换不是合并；resumeArgs 缺失时按 state 的 task/changeDir/milestone 重建首轮 args），禁止重新 author 脚本；' +
       '否则 valid=true 时 Read 对应 state JSON，并把完整对象作为 args.priorState，同时传 checkpointKey 与 ' +
-      'args.checkpointValidation={valid:true,sourceValid:true,codeValid:true,legacyUnverified:false,changedPaths:[]}；' +
+      'args.checkpointValidation={valid:true,sourceValid:true,codeValid:true,legacyUnverified:false,changedPaths:[],dirtyWorktree:<对应行 dirty 值>}；' +
+      'dirty=true（上轮实现未完成或 Verify 未绿）时即使 valid=true 也禁止直接 Plan/Review HIT，模板会先廉价 CheckpointValidate；' +
       '若 legacy=true 且 nativeResume=false，可 Read state 并传 args.checkpointValidation={valid:false,legacyUnverified:true,changedPaths:["<legacy-unverified>"]}，' +
       'OpenSpec 模板会先用廉价 Recon 模型做 CheckpointValidate，验证通过才跳过 BasePlan/Review；' +
       '普通 valid=false 且 legacy=false 时禁止复用历史 Plan/Review，只把 changedPaths 当失效证据。'

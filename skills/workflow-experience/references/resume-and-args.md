@@ -91,16 +91,19 @@ journal 路径含 sessionId：
 docs/ultracode/state/<checkpoint>.json
 ```
 
-`harvest-workflow` 每次固化 raw 后同步构建最新 state。state 保存 `recon/basePlan/effectivePlan/review/decisions/routing`，并为目标 OpenSpec change 全部 Markdown 与 BasePlan/EffectivePlan 依赖代码文件记录 SHA-256 fingerprint。
+`harvest-workflow` 每次固化 raw 后同步构建最新 state。state 保存 `recon/basePlan/effectivePlan/review/decisions/routing/resumeArgs`，并为目标 OpenSpec change 全部 Markdown 与 Plan 依赖代码文件记录 SHA-256 fingerprint。
 
-`workflow-intake` 在用户再次输入 `workflow ...` 时只注入最多 3 个候选的**路径与验证结果**，不把完整 Plan 塞进 hook context：
+`workflow-intake` 在用户再次输入 `workflow ...` 时先按 tokenScore 排序、只对前 3 个候选重算 fingerprint（5 秒 hook 预算，同 changeDir/文件的 hash 会 memoize），只注入**路径与验证结果**，不把完整 Plan 塞进 hook context：
 
-1. `nativeResume=true`：同 session + 原 scriptPath 仍存在 + script SHA1 相同 → **必须优先原生 resume**，不要重新 author；
+1. `nativeResume=true`：同 session + 原 scriptPath 仍存在 + script SHA1 相同 + **journal.jsonl 已核实存在** → **必须优先原生 resume**，不要重新 author；args 取 state 的 `resumeArgs` 全量叠加本轮新 args（全量替换非合并，缺失首轮 args 会回退占位默认值制造粘滞 miss）；
 2. `valid=true` 但不能 native resume：Read state JSON，把完整对象传 `args.priorState`，同时传 `checkpointKey` 与 `checkpointValidation` → OpenSpec 模板允许 `ARTIFACT HIT`；
-3. `legacy=true`：这是从 v0.3 raw 回填的历史结果，没有生成时刻 fingerprint，**禁止直接 artifact hit**。同 session 仍可 native resume；否则传 `legacyUnverified=true`，由廉价 Recon/Haiku 做一次 CheckpointValidate，定向重读当前 OpenSpec 与旧 Plan 涉及代码；验证通过才跳过昂贵 BasePlan/Review；
-4. 普通 `valid=false`：OpenSpec 或 Plan 依赖代码已经变化 → 不得复用历史 Plan/Review。
+3. `dirty=true`（上轮实现未完成或 Verify 未绿）：fingerprint 是对着 partial workspace 算的所以仍可能 valid，但 Reviewer 从未审过这份代码 → **禁止直接 Plan/Review HIT**，与 legacy 一样先廉价 CheckpointValidate；
+4. `legacy=true`：这是从 v0.3 raw 回填的历史结果，没有生成时刻 fingerprint，**禁止直接 artifact hit**。同 session 仍可 native resume；否则传 `legacyUnverified=true`，由廉价 Recon/Haiku 做一次 CheckpointValidate，定向重读当前 OpenSpec 与旧 Plan 涉及代码；验证通过才跳过昂贵 BasePlan/Review；
+5. 普通 `valid=false`：OpenSpec 或 Plan 依赖代码已经变化 → 不得复用历史 Plan/Review。
 
 Artifact Restore 额外 fail-safe：当前 route 若高于历史 route，不复用历史 BasePlan；历史 Review 只有在 decisions 未变、旧 verdict=approve、历史有效 route 不低于当前 route 时才命中。模板语义不兼容时 bump `cacheVersion` 统一失效。
+
+v0.4.1 起 fingerprint 覆盖扩大：代码侧为 `whitelist + slices.files + mustNotTouch + evidenceDependencies`（Planner 显式输出的 caller/public contract/关键测试），source 侧追加 changeDir 之外由 `args.proposalDoc/designDoc/tasksDoc/planDoc` 显式指定的自定义文档（`fingerprint.sourceExtra`）。旧 v0.4.0 state 没有 `dirtyWorktree` 字段时，resolver 按终态 status 兜底推断（red/failed/escalate 等一律视为 dirty）。
 
 **为什么 legacy 不能直接 hash 回填**：旧 raw 并没有保存“当时的文件 hash”。如果今天才对当前 workspace 求 hash，再把它写进旧 state，会把未知历史状态伪装成“验证通过”。因此旧记录必须 native resume 或先廉价语义验证；从 v0.4 开始的新 run 才有可信 fingerprint。
 
