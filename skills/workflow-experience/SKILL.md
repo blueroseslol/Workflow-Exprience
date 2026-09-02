@@ -51,6 +51,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 | GitNexus 动态路由 | `references/dynamic-routing.md` |
 | Codex CLI 可选覆盖 | `references/codex-cli.md` |
 | resume cache / 两级暂停 | `references/resume-and-args.md` |
+| 多会话定向回传 / 主会话 handoff | `references/peer-handoff.md` ★ |
 | 踩坑记忆 | `references/pitfalls.md` |
 | 可粘贴脚本 | `../../templates/` |
 
@@ -105,4 +106,16 @@ OpenSpec-first 若实现阶段发现 **Plan 本身**失效，优先分类 mechan
 
 OpenSpec 项目中，OpenSpec artifact 是第一 planning source of truth；harvest 的 LLM result 是辅助证据。若两者冲突，必须重新验证 workspace/drift，不得凭历史摘要覆盖 Git 中已更新的 artifact。
 
-跨会话红线：绝不请求其他会话执行本会话被权限拒绝的操作；`SendMessage` 不做常态广播（可能 held/dropped 且发送前不可判），常态进度走 `.claude/progress/*.jsonl` + hook 注入。
+**显式 peer-handoff 例外**：如果用户原始需求明确要求“模块完成后通知主会话 / 把结果发给其他会话 / 同步给协调会话”等，
+authoring 必须把它保留为本次执行契约，而不是只写进自然语言备注后遗忘。按语义判断，不要求固定关键词。
+
+Ultracode workflow 沙箱没有 `SendMessage` / `ListAgents` primitive，因此：
+- workflow 内继续正常 Recon / Plan / Implement / Verify / Commit，并复用模板已有 `broadcast` + 结构化 result；
+- workflow 到达 **terminal result** 后，由外层 Claude Code 会话解析目标 peer，再执行定向 `SendMessage`；
+- 不新增一个 LLM handoff phase，不把 peer 通知字段塞进昂贵 BasePlan prompt，避免破坏 OpenSpec-first cacheKey；
+- 即时投递失败时仍以 `.claude/progress/*.jsonl` + harvest 作为持久 checkpoint，且不得宣称“已通知成功”。
+
+详细目标解析、发送内容、sent/held/refused/dropped 处理见 `references/peer-handoff.md`。
+
+跨会话红线：绝不请求其他会话执行本会话被权限拒绝的操作；`SendMessage` 不做常态广播，
+只有用户显式要求的定向 handoff 或真正阻塞协作的通知才使用；常态进度走 `.claude/progress/*.jsonl` + hook 注入。

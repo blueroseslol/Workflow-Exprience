@@ -47,7 +47,11 @@ function main() {
         additionalContext:
           '[workflow 入口] 用户以 workflow 前缀提交开发需求。立即调用 Skill 工具' +
           '（skill: "workflow-experience:workflow-experience"）加载意图路由规则并处理该需求；' +
-          '对用户只讲阶段意图，不报内部模板文件名；不要当普通聊天直接回答。',
+          '对用户只讲阶段意图，不报内部模板文件名；不要当普通聊天直接回答。' +
+          '如果原始需求显式要求“完成后通知主会话/其他会话、回传结果、同步给协调会话”等跨会话动作，' +
+          '必须保留该意图并按 Skill 的 peer-session handoff 规则处理：workflow 内只产出结果，' +
+          'workflow 到达 terminal result 后由外层 Claude Code 会话定向执行 ListAgents/SendMessage；' +
+          '不得在 Ultracode workflow DSL 中伪造不存在的 SendMessage primitive。',
       },
     })
   )

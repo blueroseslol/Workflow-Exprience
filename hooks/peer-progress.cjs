@@ -11,7 +11,8 @@
  * 为什么不用 SendMessage 做常态广播：
  *   投递有 held / refused / dropped 三态，held 取决于对方的 permissionMode，
  *   而该字段不在 sessions/<pid>.json 里 —— 发送前静态不可判，dropped 是永久丢弃。
- *   SendMessage 保留给「真正阻塞他人」的人工通知，且必须读回执。
+ *   SendMessage 保留给「用户显式要求的定向 handoff」或「真正阻塞他人」的通知，
+ *   且必须检查投递结果；普通进度仍只走文件 checkpoint。
  */
 
 const fs = require('fs')
