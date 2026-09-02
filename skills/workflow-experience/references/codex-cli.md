@@ -116,6 +116,19 @@ codex exec --sandbox workspace-write --model gpt-5.6-sol "..."
 
 Codex CLI 没有通用 `reviewer` 角色参数；`default / worker / explorer` 是内部 subagent 角色概念，不是 `codex exec review` 的角色选择参数。
 
+## 超时与外部 watchdog（必做）
+
+Codex CLI 存在已知 automation hang 场景：Git 命令失败后 `codex exec review` 可能迟迟不产生 terminal event（截至 2026-09-01 官方仓库仍有未关闭报告）。fail-closed 只能处理「命令返回了失败」，处理不了「命令永远不返回」——**Controller 必须给每次 Codex 调用套外部超时/watchdog，不得裸等 CLI 自己退出**。
+
+```js
+const CODEX_TIMEOUT_MS = args?.codexTimeoutMs ?? 600000  // 默认 10 分钟（与 Bash 工具上限一致）；大仓库 review 可调大
+```
+
+1. 每次 `codex exec`（含 `review` / `resume` / fix）都必须带外部超时：Bash 工具 timeout 参数或 Controller 侧 watchdog 计时，二者至少其一。
+2. **超时即失败**（fail-closed 的一种）：杀掉进程，读取已落盘的 JSONL 尾部与 stderr 做诊断，状态记 `codex-timeout` 并把诊断写进 result。不得因超时静默改回 fable——用户显式要求 Codex 时 Codex 是 required。
+3. 区分「超时强杀」与「正常非零退出」：前者按 hang 嫌疑上报（附已捕获的部分输出），后者看 stderr/JSONL 解析失败原因；两者的诊断信息都必须进 result，不得吞掉。
+4. 可选增强：`--json` 模式下 watchdog 同时监视输出文件停滞——JSONL 长时间无新行即可提前判定 hang，不必等满整个超时。
+
 ## 最终原则
 
 ```text
