@@ -159,7 +159,7 @@ const IMPLEMENT_SCHEMA={type:'object',additionalProperties:false,required:['done
 const VERIFY_SCHEMA={type:'object',additionalProperties:false,required:['status','testTotal','testPassed','testFailed','typecheckExit','actualImpact','completedTaskIds','rawTail'],properties:{status:{type:'string',enum:['green','red']},testTotal:S_NUM0,testPassed:S_NUM0,testFailed:S_NUM0,typecheckExit:{type:'number'},actualImpact:{type:'object',additionalProperties:false,required:['affectedSymbols','affectedModules','processes'],properties:{affectedSymbols:S_NUM0,affectedModules:S_NUM0,processes:S_NUM0}},completedTaskIds:S_STR_ARR,rawTail:{type:'string'}}}
 const AUDIT_SCHEMA={type:'object',additionalProperties:false,required:['verdict','findings'],properties:{verdict:{type:'string',enum:['accept','needs-rework','escalate-to-human']},findings:S_STR_ARR}}
 const COMMIT_SCHEMA={type:'object',additionalProperties:false,required:['committed','commits','tickedTaskIds','note'],properties:{committed:{type:'boolean'},commits:S_STR_ARR,tickedTaskIds:S_STR_ARR,note:{type:'string'}}}
-const CHECKPOINT_VALIDATE_SCHEMA={type:'object',additionalProperties:false,required:['planStillValid','reviewStillValid','changedSliceIds','reasons'],properties:{planStillValid:{type:'boolean'},reviewStillValid:{type:'boolean'},changedSliceIds:S_STR_ARR,reasons:S_STR_ARR}}
+const CHECKPOINT_VALIDATE_SCHEMA={type:'object',additionalProperties:false,required:['planStillValid','reviewStillValid','changedSliceIds','reasons','requiresArchitect'],properties:{planStillValid:{type:'boolean'},reviewStillValid:{type:'boolean'},changedSliceIds:S_STR_ARR,reasons:S_STR_ARR,requiresArchitect:{type:'boolean',description:'失效修复涉及架构/public contract/state ownership 时 true；机械/局部修复 false'}}}
 
 const ROUTE_ORDER=['LOW','MEDIUM','HIGH','CRITICAL']
 const ROUTE_RANK={LOW:0,MEDIUM:1,HIGH:2,CRITICAL:3}
@@ -232,6 +232,7 @@ ${digest(PRIOR_STATE.basePlan)}`,
     PRIOR_DIRTY?'上轮实现未完成或 Verify 未绿（dirtyWorktree）：除 OpenSpec/代码漂移外，还必须核实已写入 workspace 的部分实现不推翻 Plan/Review 结论；无法核实即 false。':'',
     '必须亲自定向 Read 当前 proposal/design/tasks/specs，并 Read 历史 slices/whitelist 涉及的代码；可用刚完成的 Recon/GitNexus 结果导航，但不得只信历史摘要。',
     'planStillValid=true 仅当根因/切片/whitelist/tests/contract 仍成立；reviewStillValid=true 还要求历史 verdict=approve 且没有出现会推翻该审阅的新依赖/风险。',
+    'requiresArchitect=true 仅当失效修复涉及架构/public API/schema/cross-repo contract/concurrency/state ownership/persistence/migration/security；机械/局部修复为 false。',
     '任一关键文件无法核实、OpenSpec 语义变化、caller/contract 漂移时对应值必须 false；changedSliceIds 列受影响 slice。',K_FILE_LINE,
   ].filter(Boolean).join('\n'),{label:'checkpoint:validate',phase:'Recon',model:MODEL_RECON,schema:CHECKPOINT_VALIDATE_SCHEMA})
   if(!priorValidation)log('CheckpointValidate 未返回：fail-closed，不复用历史 Plan/Review')
@@ -241,8 +242,12 @@ ${digest(PRIOR_STATE.basePlan)}`,
 // ★ DECISIONS 绝不进入 BasePlan prompt：拍板后 same-session resume 可让 BasePlan HIT；跨 run 可走 artifact hit。
 const priorRoute=PRIOR_STATE?.routing?.effectiveRoute??PRIOR_STATE?.routing?.route??null
 const basePlanArtifactHit=!!(ARTIFACT_REUSE&&PRIOR_STATE?.basePlan&&(TRUSTED_ARTIFACT_REUSE||priorValidation?.planStillValid===true)&&(!priorRoute||ROUTE_RANK[priorRoute]>=ROUTE_RANK[routing.route]))
+// dirty 选择性恢复：验证未全过但失效 slice 可定位且未覆盖全部时，以历史 Plan 为起点
+// 局部修复（PlanPatch→DeltaReview），不重跑全量 Planner；覆盖全部/无法定位才回退全量。
+const recoverySliceIds=DIRTY_ARTIFACT_CANDIDATE&&priorValidation&&priorValidation.planStillValid!==true?(priorValidation.changedSliceIds??[]).filter(id=>PRIOR_STATE?.basePlan?.slices?.some(s=>s.id===id)):[]
+const RECOVERY_PATCH_VIABLE=!!(recoverySliceIds.length&&recoverySliceIds.length<(PRIOR_STATE?.basePlan?.slices?.length??0))
 phase('Plan')
-const basePlan=basePlanArtifactHit ? PRIOR_STATE.basePlan : await agent([
+const basePlan=(basePlanArtifactHit||RECOVERY_PATCH_VIABLE) ? PRIOR_STATE.basePlan : await agent([
   `你是 ${MILESTONE} 的执行规划者。OpenSpec 是上游 Plan IR；只做 execution overlay，不从零复述/重写。`,
   `任务=${TASK}`,`repo=${REPO}`,`proposal=${PROPOSAL_DOC}`,`design=${DESIGN_DOC}`,`tasks=${TASKS_DOC}`,PLAN_DOC?`plan=${PLAN_DOC}`:'',`specs=${SPECS_GLOB}`,
   `Recon：route=${routing.route}; coverage=${recon?.openspec?.coverage??'?'}; drift=${recon?.openspec?.drift??'?'}; archGap=${recon?.openspec?.architectureGap??'?'}`,
@@ -254,6 +259,7 @@ const basePlan=basePlanArtifactHit ? PRIOR_STATE.basePlan : await agent([
   K_FILE_LINE,
 ].filter(Boolean).join('\n'),{label:'plan:base-overlay',phase:'Plan',model:plannerModel,effort:'high',schema:PLAN_SCHEMA})
 if(basePlanArtifactHit)log('BasePlan ARTIFACT HIT：跳过昂贵 Planner')
+if(RECOVERY_PATCH_VIABLE)log(`Recovery：以历史 Plan 为起点，局部修复 ${recoverySliceIds.length}/${PRIOR_STATE.basePlan.slices.length} 个失效 slice，跳过全量 Planner`)
 if(!basePlan)return{status:'failed',at:'BasePlan',routing,recon}
 if(basePlan.verdict==='blocked')return{status:'blocked',at:'BasePlan',plan:basePlan,routing}
 
@@ -288,7 +294,33 @@ let effectiveRoute=ROUTE_RANK[plan.predictedImpact.risk]>ROUTE_RANK[routing.rout
 const reviewArtifactHit=!!(effectivePlanArtifactHit&&PRIOR_STATE?.review?.verdict==='approve'&&(!priorApprovedRoute||ROUTE_RANK[priorApprovedRoute]>=ROUTE_RANK[effectiveRoute]))
 let review=reviewArtifactHit?PRIOR_STATE.review:null,patchRounds=0,changed=plan.slices.map(s=>s.id)
 if(reviewArtifactHit)log('Review ARTIFACT HIT：Plan/decisions/fingerprint 未变，跳过昂贵 Reviewer')
-if((ALWAYS_REVIEW||effectiveRoute!=='LOW')&&!reviewArtifactHit){
+
+// dirty 选择性恢复：先按 CheckpointValidate 的失效定位跑一次定向 PlanPatch；
+// 之后 patchRounds=1，下方 Review 循环第一轮自动成为 DeltaReview（只审 changed slices）。
+// 实现进度对账（哪些 slice 已写入 workspace）不做，由 patch 的"亲自重读当前代码"与 DeltaReview 兜底。
+let recoveryPatched=false
+if(RECOVERY_PATCH_VIABLE&&!reviewArtifactHit){
+  const recoveryModel=priorValidation.requiresArchitect?MODEL_STRONG:MODEL_DEFAULT
+  const targets=plan.slices.filter(s=>recoverySliceIds.includes(s.id))
+  phase('Plan')
+  const rpatch=await agent([
+    `你是 PlanPatch；历史 Plan 的部分 slice 在当前 workspace 上已失效（dirtyWorktree 恢复），只修失效 slice，不从零重写。模型档=${recoveryModel}.`,
+    `失效 slices:\n${targets.map(s=>`${s.id} ${s.title}: ${s.rationale}`).join('\n')}`,
+    `失效原因:\n${(priorValidation.reasons??[]).map(x=>`- ${x}`).join('\n')||'无'}`,
+    '亲自重读失效 slice 涉及的当前代码（实现可能已部分写入），输出 replace/add/remove slice 与 whitelist/tests/OpenSpec edit 的 delta。未失效 slice 不得进入 replaceSlices。semantic edit 必须绑定已拍板 decisionId。',K_FILE_LINE,
+  ].join('\n'),{label:'plan:recovery-patch',phase:'Plan',model:recoveryModel,effort:'high',schema:PATCH_SCHEMA})
+  if(!rpatch)return{status:'failed',at:'RecoveryPatch',checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,plan,routing}
+  if(rpatch.verdict==='blocked')return{status:'blocked',at:'RecoveryPatch',reason:'Recovery PlanPatch 无法局部修复；可不带 priorState 全量重跑',patch:rpatch,checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,plan,routing}
+  plan=applyPatch(plan,rpatch)
+  patchRounds++
+  changed=uniq(rpatch.replaceSlices.map(s=>s.id).concat(rpatch.addSlices.map(s=>s.id)).concat(rpatch.removeSliceIds))
+  effectiveRoute=ROUTE_RANK[plan.predictedImpact.risk]>ROUTE_RANK[effectiveRoute]?plan.predictedImpact.risk:effectiveRoute
+  recoveryPatched=true
+  const bad=plan.openspecEdits.filter(e=>e.semantic&&(!e.decisionId||!(e.decisionId in DECISIONS)))
+  if(bad.length)return{status:'blocked',at:'SemanticSpecGate',reason:'Recovery PlanPatch 引入未获用户拍板的 semantic edit',edits:bad,plan,routing}
+  log(`Recovery PlanPatch：局部修复 ${changed.join(', ')}（${recoveryModel}），后续只跑 DeltaReview`)
+}
+if((ALWAYS_REVIEW||effectiveRoute!=='LOW'||recoveryPatched)&&!reviewArtifactHit){
   while(true){
     phase('Review')
     const reviewBody=patchRounds===0?digest(plan):[`只复审 changed slices=${changed.join(', ')}`, ...plan.slices.filter(s=>changed.includes(s.id)).map(s=>`${s.id} ${s.title}\n${s.rationale}`),`全局 invariants: whitelist=${plan.whitelist.join(', ')}; mustNotTouch=${plan.mustNotTouch.join(', ')||'无'}; tests=${plan.testCommands.join(' && ')}`].join('\n\n')
@@ -369,4 +401,4 @@ if(commitExpected){
 }
 const commitSucceeded=commitResult?.committed===true&&(commitResult?.commits?.length??0)>0
 const finalStatus=audit?.verdict==='needs-rework'?'needs-rework':audit?.verdict==='escalate-to-human'?'escalate-to-human':commitExpected&&!commitSucceeded?'commit-failed':verify?.status??'unknown'
-return{status:finalStatus,milestone:MILESTONE,ts:TS,checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,decisionApply:{decisions:DECISIONS,architectChoices:applied.architect.map(x=>({id:x.decision.id,label:x.option.label}))},review,patchRounds,specSync,preflight:pre,impl,verify,audit,commitResult,artifactCache:{enabled:ARTIFACT_REUSE,dirty:PRIOR_DIRTY,checkpointValidated:NEEDS_CHECKPOINT_VALIDATE?priorValidation:null,reconHit:TRUSTED_ARTIFACT_REUSE&&!!PRIOR_STATE?.recon,basePlanHit:basePlanArtifactHit,effectivePlanHit:effectivePlanArtifactHit,reviewHit:reviewArtifactHit},routing:{...routing,effectiveRoute,plannerModel,implementationModel,reviewModel:MODEL_REVIEW,routeMiss},broadcast:`[${MILESTONE}] OpenSpec-first · route=${effectiveRoute} · planner=${plannerModel} · cache=${reviewArtifactHit?(NEEDS_CHECKPOINT_VALIDATE?'review-validated':'review-hit'):basePlanArtifactHit?(NEEDS_CHECKPOINT_VALIDATE?'plan-validated':'plan-hit'):'miss'} · patches=${patchRounds} · ${finalStatus}`}
+return{status:finalStatus,milestone:MILESTONE,ts:TS,checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,decisionApply:{decisions:DECISIONS,architectChoices:applied.architect.map(x=>({id:x.decision.id,label:x.option.label}))},review,patchRounds,specSync,preflight:pre,impl,verify,audit,commitResult,artifactCache:{enabled:ARTIFACT_REUSE,dirty:PRIOR_DIRTY,checkpointValidated:NEEDS_CHECKPOINT_VALIDATE?priorValidation:null,recoveryPatched,reconHit:TRUSTED_ARTIFACT_REUSE&&!!PRIOR_STATE?.recon,basePlanHit:basePlanArtifactHit,effectivePlanHit:effectivePlanArtifactHit,reviewHit:reviewArtifactHit},routing:{...routing,effectiveRoute,plannerModel,implementationModel,reviewModel:MODEL_REVIEW,routeMiss},broadcast:`[${MILESTONE}] OpenSpec-first · route=${effectiveRoute} · planner=${plannerModel} · cache=${reviewArtifactHit?(NEEDS_CHECKPOINT_VALIDATE?'review-validated':'review-hit'):basePlanArtifactHit?(NEEDS_CHECKPOINT_VALIDATE?'plan-validated':'plan-hit'):recoveryPatched?'plan-recovery':'miss'} · patches=${patchRounds} · ${finalStatus}`}

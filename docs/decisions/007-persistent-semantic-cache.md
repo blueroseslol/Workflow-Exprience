@@ -130,3 +130,22 @@ OpenSpec-first 的长期 Plan IR 与 Ultracode 的计算缓存正式分层：
 3. **dirtyWorktree 门控**：实现已执行但 Verify 未绿（failed/escalate/red）时，fingerprint 是对 partial workspace 算的，Reviewer 从未审过这份代码。state 标 `dirtyWorktree` / `reviewReusable`；dirty 候选与 legacy 一样禁止直接 Plan/Review HIT，先廉价 CheckpointValidate。旧 v0.4.0 state 缺字段时按终态 status 兜底推断。
 4. **fingerprint 覆盖扩大**：代码侧加入 `mustNotTouch` + `evidenceDependencies`（PLAN_SCHEMA 新可选字段，Planner 显式列出 caller/public contract/关键测试——B.ts caller 漂移现在会让旧 Review 失效）；source 侧加入 changeDir 之外由 `args.proposalDoc/designDoc/tasksDoc/planDoc` 显式指定的自定义文档（`fingerprint.sourceExtra`）。
 5. **resolver 性能**：`resolveCheckpointCandidates` 先 tokenScore 排序、只对 top-N 重算 fingerprint，并按 changeDir/文件 memoize hash——不再对 50 个 state 全量 hash，避免顶爆 UserPromptSubmit 的 5 秒预算导致 checkpointContext 整体丢失。
+
+## v0.4.2（2026-09-02）：dirty 选择性恢复链
+
+v0.4.1 的 dirty 门控只有"验证全过 → 整体 HIT / 否则 → 全量重跑"两档，而 plan model 昂贵，部分失效就推翻整个 Plan 浪费明显。本版把恢复链补完：
+
+```text
+dirty 候选
+  ↓ CheckpointValidate（haiku，输出 changedSliceIds / requiresArchitect）
+  ├─ planStillValid      → 整体 HIT（不变）
+  ├─ 部分失效且可定位     → 历史 Plan 为起点 + 定向 PlanPatch（requiresArchitect→Opus，否则 Kimi）
+  │                        → Review 循环第一轮自动成为 DeltaReview（patchRounds=1，只审 changed slices）
+  └─ 全部失效/无法定位     → 回退全量 Planner；patch null/blocked → fail-closed 转人工（可全量重跑）
+```
+
+实现上复用现有 Review→PlanPatch 循环，不新建并行路径：recovery patch 后 `patchRounds=1`，循环的 `patchRounds>0` 分支天然就是 DeltaReview。
+
+**明确不做的部分**：实现进度对账（哪些 slice 已写入 workspace）——由 Recovery PlanPatch 的"亲自重读当前代码"与 DeltaReview 兜底，不为 dirty 场景单独建对账机制。
+
+**已知边界**：`planStillValid=true && reviewStillValid=false` 时 Review 仍是全量重审（第一轮 `digest(plan)`），只有 patch 之后的复审才是 Delta 粒度——验证器判定"审阅已不可信"时保守重审是有意为之。
