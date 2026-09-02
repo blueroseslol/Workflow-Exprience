@@ -104,6 +104,14 @@ const REPLAN_FEEDBACK = args?.replanFeedback ?? null
 const REPLAN_ATTEMPT = args?.replanAttempt ?? 0
 const MAX_REPLAN = args?.maxReplan ?? 3
 
+// 脏工作区标记：Advisor replan 早退时 Implement 已把上一版方案的 provisional implementation
+// 落盘，下一轮 Planner 面对的是被部分修改的 workspace——残留 diff 是【待裁决的旧方案】，
+// 不是干净的现状基线。true 时 Plan prompt 注入 dirtyWorktreeDigest，强制 Planner 先审阅
+// git status/git diff 并对每处残留明确决定 retain/replace，防止把旧方案误当现状自动继承。
+// 由 Advisor replan 早退的 nextArgs.dirtyWorktree=true 传入；Review=revise 路径只透传
+// （Review 在 Implement 之前，本轮不产生新污染，但上轮残留仍在）。
+const DIRTY_WORKTREE = args?.dirtyWorktree ?? false
+
 // ---------- 复用常量 ----------
 const S_STR_ARR = { type: 'array', items: { type: 'string' } }
 const S_NUM0 = { type: 'number', minimum: 0 }   // 计数一律非负，防止负数污染 ComplexityScore
@@ -551,6 +559,19 @@ const replanDigest = REPLAN_FEEDBACK
     ].join('\n')
   : ''
 
+// 脏工作区警告：仅 Advisor replan 续跑时为 true（Review=revise 时 Implement 尚未运行）。
+// 残留 diff 是上一版方案的 provisional implementation，Planner 必须逐块裁决，不得自动继承。
+const dirtyWorktreeDigest = DIRTY_WORKTREE
+  ? [
+      '## ⚠️ 工作区残留（上一版方案的 provisional implementation，不是现状基线）',
+      '上一轮 Implement 已把部分实现落盘，随后 Advisor 判定 Plan 本身需要修订。当前 `git diff` 是【待裁决的旧方案残留】，不是你规划的起点现状。',
+      '你必须先亲自运行/阅读 `git status` 与 `git diff`，对每一处残留 hunk 明确裁决：',
+      '- **retain**：残留与新计划方向一致 → 吸收进对应切片，并在该切片 rationale 写明「继承上轮残留 + file:line」；',
+      '- **replace**：残留基于旧假设或与新计划冲突 → 在对应切片中明确要求实现者先还原/覆盖该处，并给出 file:line 证据。',
+      '禁止把残留 diff 当作已验证的正确现状直接继承，也禁止无视它导致新旧两套实现混杂。每个 hunk 的 retain/replace 决定必须在新计划中可检索。',
+    ].join('\n')
+  : ''
+
 const plan = await agent(
   [
     `你是 ${MILESTONE} 的规划者（Recon 路由等级 ${routing.route}）。只规划，不改代码，不 commit。`,
@@ -562,6 +583,7 @@ const plan = await agent(
     reconDigest,
     '',
     replanDigest,
+    dirtyWorktreeDigest,
     '## 重读纪律（关键）',
     'Recon 只是导航器。**你必须亲自重新 Read**：修改入口、关键 caller、关键 callee、public interface、tests、lifecycle/state ownership 代码。',
     K_FILE_LINE,
@@ -678,6 +700,8 @@ if (needsReview) {
     }
     // 累计反馈 + attempt 都拼进下一轮 Plan prompt（prompt 进缓存键）：
     // 即使 Review 逐字重复同一意见，prompt 也每轮不同 → Plan 必重跑，杜绝无限重放
+    // dirtyWorktree 只透传不新置：Review 在 Implement 之前，本轮未产生新污染，
+    // 但若上轮 Advisor replan 留下的残留还在（DIRTY_WORKTREE=true），必须继续让 Planner 知情
     const replanFeedback = (REPLAN_FEEDBACK ?? []).concat(roundFeedback)
     log(`Review=revise：早退 replan-required（第 ${attempt}/${MAX_REPLAN} 次），累计反馈与 attempt 随 nextArgs 注入 Plan prompt，不进入实现`)
     return {
@@ -685,7 +709,8 @@ if (needsReview) {
       milestone: MILESTONE,
       replanAttempt: attempt,
       reviewFeedback: replanFeedback,
-      nextArgs: { replanFeedback, replanAttempt: attempt },
+      dirtyWorktree: DIRTY_WORKTREE,
+      nextArgs: { replanFeedback, replanAttempt: attempt, dirtyWorktree: DIRTY_WORKTREE },
       reason: 'Review 判 revise。同 session 用 resumeFromRunId + 首轮 args 叠加 nextArgs 续跑：Recon 缓存命中，累计 replanFeedback 与 replanAttempt 改变 Plan prompt → Plan 及之后重跑并吸收修订意见；超过 maxReplan 次仍 revise 将 blocked 转人工。',
       plan,
       routing,
@@ -920,13 +945,17 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
       }
     }
     const replanFeedback = (REPLAN_FEEDBACK ?? []).concat(advisorFeedback)
+    // ⚠️ 与 Review=revise 的 replan 不同：本轮 Implement 已运行，工作区带着 provisional
+    // implementation 的残留 diff。必须让下一轮 Planner 知情并逐块裁决 retain/replace，
+    // 否则它会把旧方案残留误当现状基线，新旧实现混杂。
     return {
       status: 'replan-required',
       milestone: MILESTONE,
       replanAttempt,
       reviewFeedback: replanFeedback,
-      nextArgs: { replanFeedback, replanAttempt },
-      reason: 'Implement Advisor 判断 Plan 本身需要修订；复用现有 replanFeedback/replanAttempt 机制，不创建第二套循环。',
+      dirtyWorktree: true,
+      nextArgs: { replanFeedback, replanAttempt, dirtyWorktree: true },
+      reason: 'Implement Advisor 判断 Plan 本身需要修订；复用现有 replanFeedback/replanAttempt 机制，不创建第二套循环。本轮 Implement 已落盘部分实现，nextArgs.dirtyWorktree=true：下一轮 Planner 必须先审阅 git status/git diff，对残留 hunk 逐块决定 retain/replace，不得误当现状自动继承。',
       impl,
       plan,
       routing,

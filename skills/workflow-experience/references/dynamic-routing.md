@@ -158,6 +158,8 @@ Kimi/Sonnet Implement
   → 多次仍不收敛 / escalate-implementation → 仅 Implement 升级 Opus
 ```
 
+**Advisor replan ≠ Review replan（脏工作区）**：Review=revise 的 replan 发生在 Implement 之前，工作区是干净的；Advisor 判 replan 时 Implement 已把部分实现落盘，工作区带着上一版方案的 provisional implementation。后者早退的 result 与 `nextArgs` 会带 `dirtyWorktree: true`（Review 路径只透传、不新置），下一轮 Plan prompt 会因此注入残留裁决段：Planner 必须先亲自审阅 `git status` / `git diff`，把残留当作【待裁决的旧方案】而非现状基线——对每个 hunk 明确决定 **retain**（与新计划一致 → 吸收进对应切片，rationale 写明「继承上轮残留 + file:line」）或 **replace**（基于旧假设/与新计划冲突 → 切片中要求实现者先还原或覆盖，附 file:line 证据）。禁止自动继承残留，也禁止无视它导致新旧两套实现混杂。
+
 触发条件包括：合理修复后测试仍失败且根因不明、Plan 关键假设与源码冲突、需要越出 whitelist、新发现跨模块/API/schema/concurrency/lifecycle/state machine/persistence/serialization 风险、GitNexus 与 Plan 冲突、存在多个明显不同风险的实现方案。
 
 禁止用顾问处理普通编译/类型/格式问题。顾问默认：
