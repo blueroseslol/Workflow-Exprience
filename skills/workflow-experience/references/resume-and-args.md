@@ -83,6 +83,29 @@ journal 路径含 sessionId：
 
 ⚠️ **resume 的 args 是全量替换，不是合并**：首轮 args（`repo` / `task` / `milestone` / `ts`…）必须原样带上再叠加 `nextArgs` / `decisions`，否则脚本回退到 `<占位>` 默认值。
 
+## v0.4：Semantic Artifact Cache（跨 run / 跨 session）
+
+原生 resume 保存的是**计算缓存**，不能跨 session；`docs/ultracode/raw/` 保存的是**历史快照**，v0.3 以前没有读回执行路径。v0.4 新增：
+
+```text
+docs/ultracode/state/<checkpoint>.json
+```
+
+`harvest-workflow` 每次固化 raw 后同步构建最新 state。state 保存 `recon/basePlan/effectivePlan/review/decisions/routing`，并为目标 OpenSpec change 全部 Markdown 与 BasePlan/EffectivePlan 依赖代码文件记录 SHA-256 fingerprint。
+
+`workflow-intake` 在用户再次输入 `workflow ...` 时只注入最多 3 个候选的**路径与验证结果**，不把完整 Plan 塞进 hook context：
+
+1. `nativeResume=true`：同 session + 原 scriptPath 仍存在 + script SHA1 相同 → **必须优先原生 resume**，不要重新 author；
+2. `valid=true` 但不能 native resume：Read state JSON，把完整对象传 `args.priorState`，同时传 `checkpointKey` 与 `checkpointValidation` → OpenSpec 模板允许 `ARTIFACT HIT`；
+3. `legacy=true`：这是从 v0.3 raw 回填的历史结果，没有生成时刻 fingerprint，**禁止直接 artifact hit**。同 session 仍可 native resume；否则传 `legacyUnverified=true`，由廉价 Recon/Haiku 做一次 CheckpointValidate，定向重读当前 OpenSpec 与旧 Plan 涉及代码；验证通过才跳过昂贵 BasePlan/Review；
+4. 普通 `valid=false`：OpenSpec 或 Plan 依赖代码已经变化 → 不得复用历史 Plan/Review。
+
+Artifact Restore 额外 fail-safe：当前 route 若高于历史 route，不复用历史 BasePlan；历史 Review 只有在 decisions 未变、旧 verdict=approve、历史有效 route 不低于当前 route 时才命中。模板语义不兼容时 bump `cacheVersion` 统一失效。
+
+**为什么 legacy 不能直接 hash 回填**：旧 raw 并没有保存“当时的文件 hash”。如果今天才对当前 workspace 求 hash，再把它写进旧 state，会把未知历史状态伪装成“验证通过”。因此旧记录必须 native resume 或先廉价语义验证；从 v0.4 开始的新 run 才有可信 fingerprint。
+
+**插件重装/升级本身不再等于 Plan cache 全失效**——只要 native resume 不可用但可信 fingerprint 仍有效，就转 Semantic Artifact Cache；`cacheVersion` 变化则必须重算。
+
 ## 决议边界
 
 不要把整个 Stage 合成一个 workflow。`need-decision` 只负责返回问题；主 agent 再按上面的 session 边界选择 Resume 或 Checkpoint。Workflow 中途交互、args 结构与 determinism 的通用规则直接查 `workflow-authoring`。

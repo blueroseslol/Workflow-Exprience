@@ -37,6 +37,22 @@ const SPECS_GLOB = args?.specsGlob ?? `${CHANGE_DIR}/specs/**/*.md`
 const MILESTONE = args?.milestone ?? '<task/milestone>'
 const TS = args?.ts ?? 'unknown-ts'
 const DECISIONS = args?.decisions ?? {}
+const CHECKPOINT_KEY = args?.checkpointKey ?? `${CHANGE_DIR}::${MILESTONE}`
+const PRIOR_STATE = args?.priorState ?? null
+const CHECKPOINT_VALIDATION = args?.checkpointValidation ?? null
+const CHECKPOINT_CACHE_VERSION = 1
+const CHECKPOINT_META = {
+  kind: 'openspec-incremental-v4', cacheVersion: CHECKPOINT_CACHE_VERSION, key: CHECKPOINT_KEY,
+  task: TASK, changeDir: CHANGE_DIR, milestone: MILESTONE,
+}
+const STATE_COMPATIBLE = !!(
+  PRIOR_STATE && PRIOR_STATE.kind === 'ultracode-semantic-state' &&
+  PRIOR_STATE.cacheVersion === CHECKPOINT_CACHE_VERSION &&
+  PRIOR_STATE.checkpointKey === CHECKPOINT_KEY
+)
+const TRUSTED_ARTIFACT_REUSE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && CHECKPOINT_VALIDATION?.valid === true)
+const LEGACY_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && PRIOR_STATE?.legacyUnverified && CHECKPOINT_VALIDATION?.legacyUnverified === true)
+const ARTIFACT_REUSE = TRUSTED_ARTIFACT_REUSE || LEGACY_ARTIFACT_CANDIDATE
 
 const MODEL_RECON = args?.reconModel ?? 'haiku'
 const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet' // 本机 Kimi K3
@@ -137,12 +153,14 @@ const IMPLEMENT_SCHEMA={type:'object',additionalProperties:false,required:['done
 const VERIFY_SCHEMA={type:'object',additionalProperties:false,required:['status','testTotal','testPassed','testFailed','typecheckExit','actualImpact','completedTaskIds','rawTail'],properties:{status:{type:'string',enum:['green','red']},testTotal:S_NUM0,testPassed:S_NUM0,testFailed:S_NUM0,typecheckExit:{type:'number'},actualImpact:{type:'object',additionalProperties:false,required:['affectedSymbols','affectedModules','processes'],properties:{affectedSymbols:S_NUM0,affectedModules:S_NUM0,processes:S_NUM0}},completedTaskIds:S_STR_ARR,rawTail:{type:'string'}}}
 const AUDIT_SCHEMA={type:'object',additionalProperties:false,required:['verdict','findings'],properties:{verdict:{type:'string',enum:['accept','needs-rework','escalate-to-human']},findings:S_STR_ARR}}
 const COMMIT_SCHEMA={type:'object',additionalProperties:false,required:['committed','commits','tickedTaskIds','note'],properties:{committed:{type:'boolean'},commits:S_STR_ARR,tickedTaskIds:S_STR_ARR,note:{type:'string'}}}
+const CHECKPOINT_VALIDATE_SCHEMA={type:'object',additionalProperties:false,required:['planStillValid','reviewStillValid','changedSliceIds','reasons'],properties:{planStillValid:{type:'boolean'},reviewStillValid:{type:'boolean'},changedSliceIds:S_STR_ARR,reasons:S_STR_ARR}}
 
 const ROUTE_ORDER=['LOW','MEDIUM','HIGH','CRITICAL']
 const ROUTE_RANK={LOW:0,MEDIUM:1,HIGH:2,CRITICAL:3}
 const maxRoute=(a,b)=>ROUTE_ORDER[Math.max(ROUTE_ORDER.indexOf(a),ROUTE_ORDER.indexOf(b))]
 const uniq=xs=>{const out=[];for(const x of xs??[])if(x&&!out.includes(x))out.push(x);return out}
 const minus=(xs,ys)=>(xs??[]).filter(x=>!(ys??[]).includes(x))
+const decisionKey=o=>JSON.stringify(Object.keys(o??{}).sort().map(k=>[k,o[k]]))
 
 function computeRouting(r){
   if(!r)return{score:null,route:'HIGH',failsafe:true,reasons:['Recon null → HIGH']}
@@ -179,12 +197,13 @@ function applyPatch(plan,p){
 function digest(p){return[`basis=${p.executionBasis}`,`slices:\n${p.slices.map(s=>`- ${s.id} tasks=${s.sourceTaskIds.join(',')} files=${s.files.join(', ')} — ${s.rationale}`).join('\n')}`,`whitelist=${p.whitelist.join(', ')}`,`mustNotTouch=${p.mustNotTouch.join(', ')||'无'}`,`tests=${p.testCommands.join(' && ')}`,`risk=${p.predictedImpact.risk}`].join('\n\n')}
 
 phase('Recon')
-const recon=await agent([
+const recon=TRUSTED_ARTIFACT_REUSE&&PRIOR_STATE.recon ? PRIOR_STATE.recon : await agent([
   '你是 OpenSpec-first Recon（只读）。OpenSpec 是上游 Plan IR，但必须用源码/GitNexus 验证是否仍成立。',
   `任务：${TASK}`,`repo=${REPO}`,`proposal=${PROPOSAL_DOC}`,`design=${DESIGN_DOC}`,`tasks=${TASKS_DOC}`,PLAN_DOC?`plan=${PLAN_DOC}`:'',`specs=${SPECS_GLOB}`,`目标=${MILESTONE}`,
   '先定位相关 task/heading，再做定向 Read；不要无条件吞完整长文档。用 GitNexus query/context/impact/api_impact/shape_check 验证 caller、flow、contract。',
   '输出 coverage/drift/architectureGap/semanticSpecChange。OpenSpec 与代码冲突时，以源码/测试为运行事实，但必须标 drift。只输出事实，不写实现计划。',K_FILE_LINE,
 ].filter(Boolean).join('\n'),{label:'recon:openspec',phase:'Recon',model:MODEL_RECON,schema:RECON_SCHEMA})
+if(TRUSTED_ARTIFACT_REUSE&&PRIOR_STATE.recon)log('Recon ARTIFACT HIT：fingerprint 未变化，复用历史 evidence map')
 
 const routing=computeRouting(recon)
 const needsStrongPlan=!!recon&&(recon.openspec.architectureGap||recon.openspec.semanticSpecChange||(recon.openspec.coverage!=='complete'&&ROUTE_RANK[routing.route]>=ROUTE_RANK.HIGH))
@@ -192,9 +211,30 @@ const plannerModel=needsStrongPlan?MODEL_STRONG:MODEL_DEFAULT
 const implementationModel=routing.route==='CRITICAL'?MODEL_STRONG:MODEL_DEFAULT
 log(`OpenSpec coverage=${recon?.openspec?.coverage??'?'} drift=${recon?.openspec?.drift??'?'} route=${routing.route} planner=${plannerModel}`)
 
-// ★ DECISIONS 绝不进入 BasePlan prompt：拍板后 same-session resume 可让 BasePlan HIT。
+// v0.3 历史 raw 没有生成时刻 fingerprint。不能把“今天回填的 hash”当成历史真实性；
+// 跨 session 时只允许先用廉价 Recon 模型验证旧 Plan/Review，再决定是否跳过昂贵模型。
+let legacyValidation=null
+if(LEGACY_ARTIFACT_CANDIDATE&&PRIOR_STATE?.basePlan){
+  phase('Recon')
+  legacyValidation=await agent([
+    '你是 CheckpointValidate（廉价只读验证器），不是 Planner。判断历史 Plan/Review 是否仍适用于当前 OpenSpec 与代码。',
+    `当前任务=${TASK}; change=${CHANGE_DIR}; milestone=${MILESTONE}; route=${routing.route}`,
+    `历史 BasePlan:
+${digest(PRIOR_STATE.basePlan)}`,
+    PRIOR_STATE?.review?`历史 Review verdict=${PRIOR_STATE.review.verdict}`:'历史 Review 缺失',
+    '必须亲自定向 Read 当前 proposal/design/tasks/specs，并 Read 历史 slices/whitelist 涉及的代码；可用刚完成的 Recon/GitNexus 结果导航，但不得只信历史摘要。',
+    'planStillValid=true 仅当根因/切片/whitelist/tests/contract 仍成立；reviewStillValid=true 还要求历史 verdict=approve 且没有出现会推翻该审阅的新依赖/风险。',
+    '任一关键文件无法核实、OpenSpec 语义变化、caller/contract 漂移时对应值必须 false；changedSliceIds 列受影响 slice。',K_FILE_LINE,
+  ].join('\n'),{label:'checkpoint:validate',phase:'Recon',model:MODEL_RECON,schema:CHECKPOINT_VALIDATE_SCHEMA})
+  if(!legacyValidation)log('CheckpointValidate 未返回：fail-closed，不复用历史 Plan/Review')
+  else log(`Legacy checkpoint validate：plan=${legacyValidation.planStillValid} review=${legacyValidation.reviewStillValid}`)
+}
+
+// ★ DECISIONS 绝不进入 BasePlan prompt：拍板后 same-session resume 可让 BasePlan HIT；跨 run 可走 artifact hit。
+const priorRoute=PRIOR_STATE?.routing?.effectiveRoute??PRIOR_STATE?.routing?.route??null
+const basePlanArtifactHit=!!(ARTIFACT_REUSE&&PRIOR_STATE?.basePlan&&(TRUSTED_ARTIFACT_REUSE||legacyValidation?.planStillValid===true)&&(!priorRoute||ROUTE_RANK[priorRoute]>=ROUTE_RANK[routing.route]))
 phase('Plan')
-const basePlan=await agent([
+const basePlan=basePlanArtifactHit ? PRIOR_STATE.basePlan : await agent([
   `你是 ${MILESTONE} 的执行规划者。OpenSpec 是上游 Plan IR；只做 execution overlay，不从零复述/重写。`,
   `任务=${TASK}`,`repo=${REPO}`,`proposal=${PROPOSAL_DOC}`,`design=${DESIGN_DOC}`,`tasks=${TASKS_DOC}`,PLAN_DOC?`plan=${PLAN_DOC}`:'',`specs=${SPECS_GLOB}`,
   `Recon：route=${routing.route}; coverage=${recon?.openspec?.coverage??'?'}; drift=${recon?.openspec?.drift??'?'}; archGap=${recon?.openspec?.architectureGap??'?'}`,
@@ -204,16 +244,21 @@ const basePlan=await agent([
   'OpenSpec 机械补洞列 openspecEdits semantic=false, decisionId=""。任何 semantic=true edit 必须同时给 decisionPoint，并把 decisionId 指向它；不得自行批准语义变化。',
   K_FILE_LINE,
 ].filter(Boolean).join('\n'),{label:'plan:base-overlay',phase:'Plan',model:plannerModel,effort:'high',schema:PLAN_SCHEMA})
+if(basePlanArtifactHit)log('BasePlan ARTIFACT HIT：跳过昂贵 Planner')
 if(!basePlan)return{status:'failed',at:'BasePlan',routing,recon}
 if(basePlan.verdict==='blocked')return{status:'blocked',at:'BasePlan',plan:basePlan,routing}
 
 const applied=applyDecisions(basePlan,DECISIONS)
 if(applied.invalid.length)return{status:'blocked',at:'DecisionApply',invalid:applied.invalid,plan:basePlan,routing}
-if(applied.unresolved.length)return{status:'need-decision',at:'DecisionApply',milestone:MILESTONE,decisionPoints:applied.unresolved,plan:basePlan,routing,howToResume:'同 session 用原 scriptPath + resumeFromRunId，完整首轮 args 叠加 decisions；BasePlan prompt 不含 decisions，应 CACHE HIT。'}
-let plan=applied.plan
+if(applied.unresolved.length)return{status:'need-decision',at:'DecisionApply',milestone:MILESTONE,decisionPoints:applied.unresolved,checkpoint:CHECKPOINT_META,recon,basePlan,plan:basePlan,routing,howToResume:'同 session 优先原 scriptPath + resumeFromRunId；跨 run/session 由 state fingerprint 验证后传 priorState/checkpointValidation/checkpointKey，BasePlan 可 ARTIFACT HIT。'}
+const sameDecisions=ARTIFACT_REUSE&&decisionKey(PRIOR_STATE?.decisionApply?.decisions)===decisionKey(DECISIONS)
+const priorApprovedRoute=PRIOR_STATE?.routing?.effectiveRoute??PRIOR_STATE?.routing?.route??null
+const effectivePlanArtifactHit=!!(basePlanArtifactHit&&sameDecisions&&PRIOR_STATE?.review?.verdict==='approve'&&PRIOR_STATE?.effectivePlan&&(TRUSTED_ARTIFACT_REUSE||legacyValidation?.reviewStillValid===true)&&(!priorApprovedRoute||ROUTE_RANK[priorApprovedRoute]>=ROUTE_RANK[routing.route]))
+let plan=effectivePlanArtifactHit?PRIOR_STATE.effectivePlan:applied.plan
+if(effectivePlanArtifactHit)log('EffectivePlan ARTIFACT HIT：decisions 未变，复用上轮已批准 PlanPatch/PlanDelta 结果')
 
-// 普通拍板：JS 0 token。只有已选 option 明确 requiresArchitect=true 才 Opus PlanDelta。
-if(applied.architect.length){
+// 普通拍板：JS 0 token。只有新选择需要架构推理且没有命中已批准 EffectivePlan 才 Opus PlanDelta。
+if(!effectivePlanArtifactHit&&applied.architect.length){
   phase('Plan')
   const delta=await agent([
     '你是 Opus PlanDelta。BasePlan 已存在；只处理本轮 requiresArchitect=true 的已拍板选择，禁止从零重写未受影响 slice。',
@@ -231,8 +276,10 @@ const unapprovedSemantic=plan.openspecEdits.filter(e=>e.semantic&&(!e.decisionId
 if(unapprovedSemantic.length)return{status:'blocked',at:'SemanticSpecGate',reason:'存在未绑定已拍板 decision 的 semantic OpenSpec edit',edits:unapprovedSemantic,plan,routing}
 
 let effectiveRoute=ROUTE_RANK[plan.predictedImpact.risk]>ROUTE_RANK[routing.route]?plan.predictedImpact.risk:routing.route
-let review=null,patchRounds=0,changed=plan.slices.map(s=>s.id)
-if(ALWAYS_REVIEW||effectiveRoute!=='LOW'){
+const reviewArtifactHit=!!(effectivePlanArtifactHit&&PRIOR_STATE?.review?.verdict==='approve'&&(!priorApprovedRoute||ROUTE_RANK[priorApprovedRoute]>=ROUTE_RANK[effectiveRoute]))
+let review=reviewArtifactHit?PRIOR_STATE.review:null,patchRounds=0,changed=plan.slices.map(s=>s.id)
+if(reviewArtifactHit)log('Review ARTIFACT HIT：Plan/decisions/fingerprint 未变，跳过昂贵 Reviewer')
+if((ALWAYS_REVIEW||effectiveRoute!=='LOW')&&!reviewArtifactHit){
   while(true){
     phase('Review')
     const reviewBody=patchRounds===0?digest(plan):[`只复审 changed slices=${changed.join(', ')}`, ...plan.slices.filter(s=>changed.includes(s.id)).map(s=>`${s.id} ${s.title}\n${s.rationale}`),`全局 invariants: whitelist=${plan.whitelist.join(', ')}; mustNotTouch=${plan.mustNotTouch.join(', ')||'无'}; tests=${plan.testCommands.join(' && ')}`].join('\n\n')
@@ -241,11 +288,11 @@ if(ALWAYS_REVIEW||effectiveRoute!=='LOW'){
       `OpenSpec=${PROPOSAL_DOC}|${DESIGN_DOC}|${TASKS_DOC}|${SPECS_GLOB}`,`route=${effectiveRoute}`,reviewBody,
       'revise 必须输出 scope/requiresArchitect/affectedSliceIds/requiredChanges。机械/单 slice 问题禁止冒充 architecture。',
     ].join('\n'),{label:`review:plan:${patchRounds}`,phase:'Review',model:MODEL_REVIEW,effort:'high',schema:REVIEW_SCHEMA})
-    if(!review)return{status:'failed',at:'Review',plan,routing}
+    if(!review)return{status:'failed',at:'Review',checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,plan,routing}
     if(review.verdict==='approve')break
-    if(review.verdict==='block')return{status:'blocked',at:'Review',review,plan,routing}
-    if(!review.requiredChanges.length&&!review.blockers.length)return{status:'blocked',at:'Review',reason:'revise 无可执行反馈',review,plan,routing}
-    if(patchRounds>=MAX_PATCH_ROUNDS)return{status:'blocked',at:'Review',reason:`PlanPatch 达上限 ${MAX_PATCH_ROUNDS}`,review,plan,routing}
+    if(review.verdict==='block')return{status:'blocked',at:'Review',checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,review,plan,routing}
+    if(!review.requiredChanges.length&&!review.blockers.length)return{status:'blocked',at:'Review',checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,reason:'revise 无可执行反馈',review,plan,routing}
+    if(patchRounds>=MAX_PATCH_ROUNDS)return{status:'blocked',at:'Review',checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,reason:`PlanPatch 达上限 ${MAX_PATCH_ROUNDS}`,review,plan,routing}
     patchRounds++
     const patchModel=(review.requiresArchitect||review.scope==='architecture')?MODEL_STRONG:MODEL_DEFAULT
     const targets=plan.slices.filter(s=>!review.affectedSliceIds.length||review.affectedSliceIds.includes(s.id))
@@ -265,6 +312,11 @@ if(ALWAYS_REVIEW||effectiveRoute!=='LOW'){
   }
 }
 
+const checkpointEnvelope=extra=>({
+  ...extra, checkpoint:CHECKPOINT_META, recon, basePlan, effectivePlan:plan, review,
+  decisionApply:{decisions:DECISIONS,architectChoices:applied.architect.map(x=>({id:x.decision.id,label:x.option.label}))}, routing,
+})
+
 let specSync=null
 if(plan.openspecEdits.length){
   phase('SpecSync')
@@ -273,18 +325,18 @@ if(plan.openspecEdits.length){
     `changeDir=${CHANGE_DIR}`,`edits:\n${plan.openspecEdits.map(e=>`- [${e.kind}] ${e.path} semantic=${e.semantic} decision=${e.decisionId||'-'}: ${e.summary}`).join('\n')}`,
     '改前 Read、改后 Read；禁止把 [ ] 改 [x]；不得扩大到列表外语义。semantic=true 已由 JS Gate 验证 decisionId。',
   ].join('\n'),{label:'openspec:sync',phase:'SpecSync',model:MODEL_SPEC_SYNC,effort:'high',schema:SIMPLE_DONE_SCHEMA})
-  if(!specSync?.done)return{status:'failed',at:'SpecSync',specSync,plan,routing}
+  if(!specSync?.done)return checkpointEnvelope({status:'failed',at:'SpecSync',specSync,plan})
 }
 
 phase('Preflight')
 const pre=await agent(['你是 Preflight。建立修改前测试基线，不改业务代码。',`命令=${plan.testCommands.join(' && ')}`,K_FAIL_LOUD].join('\n'),{label:'preflight',phase:'Preflight',model:MODEL_VERIFY,schema:PREFLIGHT_SCHEMA})
-if(!pre)return{status:'failed',at:'Preflight',routing}
-if(!pre.ready)return{status:'blocked',at:'Preflight',blockers:pre.blockers,routing}
+if(!pre)return checkpointEnvelope({status:'failed',at:'Preflight'})
+if(!pre.ready)return checkpointEnvelope({status:'blocked',at:'Preflight',blockers:pre.blockers})
 
 phase('Implement')
 const impl=await agent(['你是实现层。严格按已批准 OpenSpec execution overlay 实现。',digest(plan),'只改 whitelist；mustNotTouch 禁止触碰。改前/改后 Read；不 commit、不 push、不提前勾 task；做不完列 notImplemented。',K_FAIL_LOUD].join('\n'),{label:'implement',phase:'Implement',model:implementationModel,effort:'xhigh',schema:IMPLEMENT_SCHEMA})
-if(!impl)return{status:'failed',at:'Implement',plan,routing}
-if(!impl.done)return{status:'escalate',at:'Implement',reason:impl.notImplemented.join('；')||impl.honesty,plan,routing}
+if(!impl)return checkpointEnvelope({status:'failed',at:'Implement',plan})
+if(!impl.done)return checkpointEnvelope({status:'escalate',at:'Implement',reason:impl.notImplemented.join('；')||impl.honesty,plan})
 
 phase('Verify')
 const verify=await agent(['你是独立 Verify。自己跑测试/typecheck；只验证，不 commit。',`tests=${plan.testCommands.join(' && ')}`,`baseline=${pre.testPassed}/${pre.testTotal}; typecheck=${pre.typecheckExit}`,`GitNexus detect_changes(scope=all, repo="${GNX}", worktree="${WORKTREE}")；公共 symbol 重跑 context/impact。`,`核对 ${TASKS_DOC} 验收；completedTaskIds 仅填有测试/退出码/代码证据的任务，暂不勾 checkbox。`,K_FAIL_LOUD].join('\n'),{label:'verify',phase:'Verify',model:MODEL_VERIFY,schema:VERIFY_SCHEMA})
@@ -297,7 +349,7 @@ let audit=null
 if(needsAudit){
   phase('Audit')
   audit=await agent(['你是 Final Audit。亲自看 git diff/changed files/关键 caller/OpenSpec requirements，不得只看摘要。',`route=${effectiveRoute}; routeMiss=${routeMiss}`,digest(plan),`verify=${verify?.status??'?'} ${verify?.testPassed??'?'}/${verify?.testTotal??'?'}`, '重点：实现是否偏离 spec/design、OpenSpec sync 是否漏掉已批准 delta、实际 blast radius 是否超计划。'].join('\n'),{label:'final-audit',phase:'Audit',model:MODEL_REVIEW,effort:'high',schema:AUDIT_SCHEMA})
-  if(!audit)return{status:'failed',at:'Audit',verify,routing}
+  if(!audit)return checkpointEnvelope({status:'failed',at:'Audit',verify})
 }
 const auditBlocks=needsAudit&&audit.verdict!=='accept'
 const commitExpected=REQUIRE_COMMIT&&verify?.status==='green'&&!auditBlocks
@@ -308,4 +360,4 @@ if(commitExpected){
 }
 const commitSucceeded=commitResult?.committed===true&&(commitResult?.commits?.length??0)>0
 const finalStatus=audit?.verdict==='needs-rework'?'needs-rework':audit?.verdict==='escalate-to-human'?'escalate-to-human':commitExpected&&!commitSucceeded?'commit-failed':verify?.status??'unknown'
-return{status:finalStatus,milestone:MILESTONE,ts:TS,recon,basePlan,effectivePlan:plan,decisionApply:{decisions:DECISIONS,architectChoices:applied.architect.map(x=>({id:x.decision.id,label:x.option.label}))},review,patchRounds,specSync,preflight:pre,impl,verify,audit,commitResult,routing:{...routing,effectiveRoute,plannerModel,implementationModel,reviewModel:MODEL_REVIEW,routeMiss},broadcast:`[${MILESTONE}] OpenSpec-first · route=${effectiveRoute} · planner=${plannerModel} · patches=${patchRounds} · ${finalStatus}`}
+return{status:finalStatus,milestone:MILESTONE,ts:TS,checkpoint:CHECKPOINT_META,recon,basePlan,effectivePlan:plan,decisionApply:{decisions:DECISIONS,architectChoices:applied.architect.map(x=>({id:x.decision.id,label:x.option.label}))},review,patchRounds,specSync,preflight:pre,impl,verify,audit,commitResult,artifactCache:{enabled:ARTIFACT_REUSE,legacyValidated:LEGACY_ARTIFACT_CANDIDATE?legacyValidation:null,reconHit:TRUSTED_ARTIFACT_REUSE&&!!PRIOR_STATE?.recon,basePlanHit:basePlanArtifactHit,effectivePlanHit:effectivePlanArtifactHit,reviewHit:reviewArtifactHit},routing:{...routing,effectiveRoute,plannerModel,implementationModel,reviewModel:MODEL_REVIEW,routeMiss},broadcast:`[${MILESTONE}] OpenSpec-first · route=${effectiveRoute} · planner=${plannerModel} · cache=${reviewArtifactHit?'review-hit':basePlanArtifactHit?'plan-hit':'miss'} · patches=${patchRounds} · ${finalStatus}`}

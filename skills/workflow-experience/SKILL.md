@@ -38,11 +38,14 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 - OpenSpec-first 用户拍板：同 session resume + `args.decisions`；BasePlan prompt 不含 decisions，因此 BasePlan 应命中；普通选择由 JS Apply，架构选择才跑 Opus PlanDelta；
 - `need-decision` 跨 session：Git 中最新 OpenSpec artifacts 是第一 planning checkpoint，再辅以 `docs/ultracode/raw/` 与 `.claude/progress/*.jsonl`。
 
+**持久语义缓存 v0.4**：hook 注入 `[Ultracode checkpoint resolver]` 先判候选再 author：`nativeResume=true` 用原 `scriptPath + resumeFromRunId`；`valid=true` → Read state 传 `priorState/checkpointKey/checkpointValidation` 走 ARTIFACT HIT；`legacy=true` 禁直接 hit，跨 session 先 haiku CheckpointValidate；`valid=false` 禁复用。
+
 ## 索引（按需 Read）
 
 | 需要什么 | Read |
 |---|---|
 | OpenSpec-first / DecisionApply / PlanPatch / SpecSync | `references/openspec-first.md` ★ |
+| resume / 两级暂停 / 跨 session artifact cache | `references/resume-and-args.md` + ADR-007 ★ |
 | 本机取证型 schema 实例 | `references/schemas.md` |
 | prompt 开场白语料 | `references/prompt-openers.md` |
 | 高频约束句式与命中率 | `references/constraints.md` |
@@ -50,7 +53,6 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 | 模型别名与 effort 本机实测 | `references/model-effort.md` |
 | GitNexus 动态路由 | `references/dynamic-routing.md` |
 | Codex CLI 可选覆盖 | `references/codex-cli.md` |
-| resume cache / 两级暂停 | `references/resume-and-args.md` |
 | 多会话定向回传 / 主会话 handoff | `references/peer-handoff.md` ★ |
 | 踩坑记忆 | `references/pitfalls.md` |
 | 可粘贴脚本 | `../../templates/` |
@@ -102,7 +104,7 @@ OpenSpec-first 若实现阶段发现 **Plan 本身**失效，优先分类 mechan
 
 ## 决议与跨会话
 
-不要把整个 Stage 合并成一个长 workflow。以**决议边界**切分；同 session 用 Resume 复用计算缓存，跨 session 用 Git 中最新 OpenSpec + harvest result + `.claude/progress/*.jsonl` 做 Checkpoint。
+不要把整个 Stage 合并成一个长 workflow。以**决议边界**切分；同 session 优先 Runtime Resume，否则走 state JSON Artifact Restore（legacy 先廉价验证），缺失/失效才退回 Git OpenSpec + raw harvest 普通 Checkpoint。
 
 OpenSpec 项目中，OpenSpec artifact 是第一 planning source of truth；harvest 的 LLM result 是辅助证据。若两者冲突，必须重新验证 workspace/drift，不得凭历史摘要覆盖 Git 中已更新的 artifact。
 

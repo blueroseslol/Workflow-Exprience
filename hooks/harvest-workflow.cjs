@@ -21,6 +21,7 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const crypto = require('crypto')
+const { buildStateFromRun, backfillStates } = require('./checkpoint-lib.cjs')
 
 const MAX_SCAN = 200 // 单次最多处理的 wf 文件数，防御性上限
 
@@ -68,6 +69,10 @@ function main() {
   const indexPath = path.join(docsDir, 'index.jsonl')
   const progressDir = path.join(cwd, '.claude', 'progress')
 
+  // v0.4：把旧 raw snapshot 尝试回填成 checkpoint 候选。
+  // 旧 v0.3 raw 会标记 legacyUnverified：只能 native resume，或先走廉价 CheckpointValidate。
+  backfillStates(cwd)
+
   let harvested = 0
 
   for (const f of files) {
@@ -84,6 +89,9 @@ function main() {
     try {
       fs.mkdirSync(rawDir, { recursive: true })
       fs.copyFileSync(path.join(runsDir, f), path.join(rawDir, f))
+      // raw 是不可变历史；state 是最新可恢复 Plan/Review checkpoint。当前 run 在 Stop 时刻
+      // 直接建立可信 fingerprint；与历史 backfill 的 legacyUnverified 明确区分。
+      buildStateFromRun({ run, cwd, sessionId })
 
       const entry = {
         runId: run.runId || runId,

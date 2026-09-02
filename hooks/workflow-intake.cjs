@@ -14,6 +14,7 @@
  */
 
 const fs = require('fs')
+const { resolveCheckpointCandidates } = require('./checkpoint-lib.cjs')
 
 // 前缀正则：可选 /，workflow 或 workflow-experience，后接非空需求
 // （配合下方 trim()，实际匹配的是消息首个非空白字符处，不是严格物理行首）
@@ -40,6 +41,28 @@ function main() {
   const m = prompt.trim().match(PREFIX)
   if (!m) return
 
+  const sessionId = input.session_id || input.sessionId || null
+  const cwd = input.cwd || process.cwd()
+  const candidates = resolveCheckpointCandidates({ cwd, sessionId, requirement: m[1], limit: 3 })
+  let checkpointContext = ''
+  if (candidates.length) {
+    const rows = candidates.map((c, i) => {
+      const changed = c.validation.changedPaths.slice(0, 5).join(',') || '-'
+      return `#${i + 1} path=${c.path} key=${c.checkpointKey} change=${c.changeDir} milestone=${c.milestone} ` +
+        `valid=${c.validation.valid} legacy=${c.legacyUnverified} nativeResume=${c.nativeResumeEligible} runId=${c.runId || '-'} ` +
+        `scriptPath=${c.scriptPath || '-'} changed=${changed}`
+    })
+    checkpointContext =
+      '\n[Ultracode checkpoint resolver] 发现历史语义 checkpoint 候选：\n' + rows.join('\n') +
+      '\n恢复规则：只使用与本需求 change/milestone/task 明确匹配的候选。' +
+      '若 nativeResume=true，必须优先使用该候选的原 scriptPath + resumeFromRunId，禁止重新 author 脚本；' +
+      '否则 valid=true 时 Read 对应 state JSON，并把完整对象作为 args.priorState，同时传 checkpointKey 与 ' +
+      'args.checkpointValidation={valid:true,sourceValid:true,codeValid:true,legacyUnverified:false,changedPaths:[]}；' +
+      '若 legacy=true 且 nativeResume=false，可 Read state 并传 args.checkpointValidation={valid:false,legacyUnverified:true,changedPaths:["<legacy-unverified>"]}，' +
+      'OpenSpec 模板会先用廉价 Recon 模型做 CheckpointValidate，验证通过才跳过 BasePlan/Review；' +
+      '普通 valid=false 且 legacy=false 时禁止复用历史 Plan/Review，只把 changedPaths 当失效证据。'
+  }
+
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {
@@ -51,7 +74,7 @@ function main() {
           '如果原始需求显式要求“完成后通知主会话/其他会话、回传结果、同步给协调会话”等跨会话动作，' +
           '必须保留该意图并按 Skill 的 peer-session handoff 规则处理：workflow 内只产出结果，' +
           'workflow 到达 terminal result 后由外层 Claude Code 会话定向执行 ListAgents/SendMessage；' +
-          '不得在 Ultracode workflow DSL 中伪造不存在的 SendMessage primitive。',
+          '不得在 Ultracode workflow DSL 中伪造不存在的 SendMessage primitive。' + checkpointContext,
       },
     })
   )
