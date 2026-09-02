@@ -77,6 +77,7 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 │       ├── gitnexus-block.md  前置/后置检查块
 │       ├── model-effort.md    模型分工 + effort 门控真相 ★
 │       ├── dynamic-routing.md 动态模型路由 + GitNexus 复杂度评分（实验）
+│       ├── codex-cli.md        可选 Codex CLI 审阅 / 修改覆盖
 │       ├── resume-and-args.md 缓存键 / resume 限制 / args 门 / 两级暂停（Resume vs Checkpoint）
 │       └── pitfalls.md        十条踩坑记忆
 ├── templates/               可粘贴成品脚本（核心交付物）

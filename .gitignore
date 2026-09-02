@@ -2,5 +2,6 @@ node_modules/
 *.local.json
 *.log
 tmp/
+.tmp/
 .claude
 docs/ultracode/

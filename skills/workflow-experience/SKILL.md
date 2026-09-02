@@ -33,6 +33,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— 意图路
 | GitNexus 前置/后置检查块 | `references/gitnexus-block.md` |
 | 模型分工与 effort 门控真相 | `references/model-effort.md` |
 | 动态模型路由与 GitNexus 复杂度评分 | `references/dynamic-routing.md` |
+| Codex CLI 可选审阅 / 修改 | `references/codex-cli.md` |
 | resume / args / 缓存键 / 两级暂停 | `references/resume-and-args.md` |
 | 踩坑记忆 | `references/pitfalls.md` |
 | 可粘贴成品脚本 | `../../templates/four-phase.js` 等 |
@@ -75,7 +76,8 @@ export const meta = {
 
 `model` 不确定时**省略**它——继承会话模型通常就是对的。
 
-**动态路由**（实验）：Recon(haiku) 出证据地图 → JS 纯函数算 ComplexityScore → 路由 LOW/MEDIUM/HIGH/CRITICAL 派生模型链。规则见 `references/dynamic-routing.md`，模板见 `../../templates/gitnexus-routed.js`。`four-phase.js` 仍是默认 baseline。
+**动态路由**：规则见 `references/dynamic-routing.md`，模板见 `../../templates/gitnexus-routed.js`。
+**Codex 覆盖**：默认 Review/Audit 仍是 `fable`；仅用户明确要求时切 Codex CLI，见 `references/codex-cli.md`。
 
 ## 取证型 VERIFY_SCHEMA（反制假绿的正确姿势）
 
