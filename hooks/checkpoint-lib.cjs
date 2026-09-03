@@ -18,6 +18,19 @@ function sha256(s) {
   return crypto.createHash('sha256').update(s).digest('hex')
 }
 
+// 纯 JS FNV-1a(32-bit):workflow 模板沙箱禁 require/crypto,
+// nochg checkpointKey 的 task 摘要必须在模板与 hook 两侧用同一可复现弱 hash。
+// 仅防同 repo 同 milestone 碰撞,不承担安全语义。
+function fnv1aHex(s) {
+  let h = 0x811c9dc5
+  const str = String(s || '')
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0
+  }
+  return ('0000000' + h.toString(16)).slice(-8)
+}
+
 function readJson(p) {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'))
@@ -196,10 +209,24 @@ function validateState(cwd, state, cache = null) {
   const oldSource = state.fingerprint.source
   const oldExtra = state.fingerprint.sourceExtra
   const oldCode = state.fingerprint.code
+  // kind='none'(非 OpenSpec 链无 markdown 来源):sourceValid 恒 false(trustCeiling=A),
+  // valid 恒 false,只可走 nativeResume 或 CheckpointValidate;code 侧照常比对供模板第四门判定。
+  if (oldSource?.kind === 'none') {
+    const codeNow = fingerprintExactFilesCached(cwd, (oldCode?.files || []).map(e => e.path), cache)
+    const codeValid = !oldCode || (oldCode.files || []).length === 0 || oldCode.digest === codeNow.digest
+    return {
+      valid: false,
+      sourceValid: false,
+      codeValid,
+      legacyUnverified: false,
+      sourceKind: 'none',
+      changedPaths: [...new Set(diffFingerprint(oldCode, codeNow))].sort(),
+    }
+  }
   const sourceNow = fingerprintMarkdownTreeCached(cwd, oldSource?.roots || [], cache)
   const codeNow = fingerprintExactFilesCached(cwd, (oldCode?.files || []).map(e => e.path), cache)
-  // sourceExtra：changeDir 之外的自定义 proposal/design/tasks/plan 文档（v0.4.1+）。
-  // 旧 state 没有该字段时跳过，不因此判失效。
+  // sourceExtra:changeDir 之外的自定义 proposal/design/tasks/plan 文档(v0.4.1+)。
+  // 旧 state 没有该字段时跳过,不因此判失效。
   let extraValid = true
   let extraChanged = []
   if (oldExtra) {
@@ -207,8 +234,13 @@ function validateState(cwd, state, cache = null) {
     extraValid = oldExtra.digest === extraNow.digest
     extraChanged = diffFingerprint(oldExtra, extraNow)
   }
-  const sourceValid = !!oldSource && oldSource.digest === sourceNow.digest && extraValid
-  const codeValid = !!oldCode && oldCode.digest === codeNow.digest
+  // 空树 fail-closed(根因 RC1b):roots 非空但一个 markdown 都没收到(目录不存在/异常),
+  // digest 恒等于 sha256('') 空集碰撞,绝不能当「未变化」。
+  const sourceEmpty = (oldSource?.roots || []).length > 0 && (oldSource?.files || []).length === 0
+  const sourceValid = !!oldSource && !sourceEmpty && oldSource.digest === sourceNow.digest && extraValid
+  // code 侧空集合按「无可验证项」视为未漂移(kind=none/planless state 需要 codeValid=true 才能走第四门),
+  // 但 files 非空时 digest 必须严格相等。
+  const codeValid = !oldCode || (oldCode.files || []).length === 0 || oldCode.digest === codeNow.digest
   return {
     valid: sourceValid && codeValid,
     sourceValid,
@@ -242,72 +274,143 @@ function sanitizePlan(plan, specSyncDone) {
   return copy
 }
 
+// cwd 下一级子目录探测(拍板 changeDirProbe=A):script 里写的 openspec/changes/<id>
+// 在单层嵌套仓库(如 LDL_UGC 的 backend/)下真实位置是 <sub>/openspec/changes/<id>。
+// 恰 1 个命中即用;≥2 命中 fail-closed 拒建(按 changeId 粒度判定,不做全仓递归 glob)。
+function probeChangeDirSubdir(relChangeDir, cwd) {
+  const hits = []
+  let entries
+  try {
+    entries = fs.readdirSync(cwd, { withFileTypes: true })
+  } catch {
+    return { hit: null, ambiguous: false }
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue
+    const candidate = path.join(cwd, e.name, relChangeDir)
+    try {
+      if (fs.statSync(candidate).isDirectory()) hits.push(candidate)
+    } catch { /* next */ }
+  }
+  if (hits.length === 1) return { hit: hits[0], ambiguous: false }
+  if (hits.length > 1) return { hit: null, ambiguous: true }
+  return { hit: null, ambiguous: false }
+}
+
+// 返回值统一为 { ok:true, ...inferred } | { ok:false, reason },
+// reason 供 harvest 写 state-build-skipped warn 行(消灭静默 null)。
 function inferCheckpoint(run, cwd) {
+  const fail = reason => ({ ok: false, reason })
   const result = run?.result && typeof run.result === 'object' ? run.result : null
-  if (!result) return null
+  if (!result) return fail('no-result')
   const runArgs = extractRunArgs(run)
   const cp = result.checkpoint && typeof result.checkpoint === 'object' ? result.checkpoint : {}
   const candidatePlan = result.effectivePlan || result.basePlan || result.plan || null
-  if (!candidatePlan || !Array.isArray(candidatePlan.slices)) return null
+  // :251 门放宽:candidatePlan 存在时才要求 slices 数组;无 plan(planless run)放行,
+  // 由 buildStateFromRun 置 basePlan/effectivePlan=null(服务于 native-resume 与取证可见)。
+  if (candidatePlan && !Array.isArray(candidatePlan.slices)) return fail('no-slices')
 
   let changeDir = firstString(cp.changeDir, runArgs.changeDir, result.changeDir)
-  if (!changeDir) changeDir = inferChangeDirFromPlan(candidatePlan)
-  if (!changeDir) changeDir = inferChangeDirFromScript(run.script, cwd)
-  if (!changeDir || rejectPlaceholder(changeDir)) return null
+  if (!changeDir && candidatePlan) changeDir = inferChangeDirFromPlan(candidatePlan)
+  if (!changeDir) {
+    // script 正则级:先按原样 resolve 并验证存在性;不存在则走一级子目录探测。
+    const script = run.script
+    if (typeof script === 'string') {
+      const normalized = normalizeSlash(script)
+      const matches = normalized.match(/openspec\/changes\/[^/'"`\s<>]+/gi) || []
+      for (const m of matches) {
+        if (rejectPlaceholder(m)) continue
+        const direct = path.resolve(cwd, m)
+        try {
+          if (fs.statSync(direct).isDirectory()) { changeDir = direct; break }
+        } catch { /* not here */ }
+        const probe = probeChangeDirSubdir(normalizeSlash(m), cwd)
+        if (probe.ambiguous) return fail('ambiguous-change-dir')
+        if (probe.hit) { changeDir = probe.hit; break }
+      }
+    }
+  }
+  if (changeDir && rejectPlaceholder(changeDir)) changeDir = null
 
   const milestone = firstString(cp.milestone, result.milestone, runArgs.milestone) || 'default'
   const task = firstString(cp.task, result.task, runArgs.task) || ''
+  // changeDir=null 时不得退化为 "null::<milestone>"(同 repo 无 changeDir 同 milestone
+  // 的 run 会共享 statePathForKey 互相踩踏 resumeArgs/scriptSha1)——混入 task 弱 hash,
+  // 公式与 gitnexus-routed.js 模板侧 CHECKPOINT_META.key 推导一致(沙箱无 crypto,统一 fnv1a)。
   const checkpointKey = firstString(cp.key, result.checkpointKey, runArgs.checkpointKey)
-    || `${storedPath(cwd, changeDir)}::${milestone}`
-  const cacheVersion = Number(cp.cacheVersion || result.cacheVersion || (candidatePlan.sourceMode?.startsWith?.('openspec') ? 1 : 0)) || 0
-  if (cacheVersion < 1) return null
+    || (changeDir
+      ? `${storedPath(cwd, changeDir)}::${milestone}`
+      : `nochg:${fnv1aHex(task)}::${milestone}`)
+  const cacheVersion = Number(cp.cacheVersion || result.cacheVersion || (candidatePlan?.sourceMode?.startsWith?.('openspec') ? 1 : 0)) || 0
+  // cacheVersion<1 不再拒建(legacyStatePolicy=A):由 buildStateFromRun 强制 legacyUnverified=true,
+  // 绝不伪造 cacheVersion=1;模板侧 STATE_COMPATIBLE 对 legacyUnverified 放松(openspec-incremental.js)。
 
-  return { result, runArgs, changeDir, milestone, task, checkpointKey, cacheVersion }
+  return { ok: true, result, runArgs, changeDir, milestone, task, checkpointKey, cacheVersion, planless: !candidatePlan }
 }
 
 function statePathForKey(cwd, checkpointKey) {
   return path.join(cwd, 'docs', 'ultracode', 'state', `${sha256(checkpointKey).slice(0, 24)}.json`)
 }
 
+// 返回 { statePath, state } | { skipped: reason } —— 不再静默 null,
+// 调用方(harvest/backfill)负责把 reason 落成 warn 行(失败可观测)。
 function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = false }) {
   try {
     const inferred = inferCheckpoint(run, cwd)
-    if (!inferred) return null
+    if (!inferred.ok) return { skipped: inferred.reason }
     const { result, runArgs, changeDir, milestone, task, checkpointKey, cacheVersion } = inferred
     const specSyncDone = result.specSync?.done === true
     const rawBasePlan = result.basePlan || (result.at === 'DecisionApply' ? result.plan : null) || result.plan || null
     const rawEffectivePlan = result.effectivePlan || result.plan || rawBasePlan
-    if (!rawBasePlan || !rawEffectivePlan) return null
+    // :280 门删除:planless run(result 无 plan,如 recon_summary+implement+verify+finalize 形态)
+    // 也建档,basePlan/effectivePlan 置 null —— 服务于 native-resume(resumeArgs)与取证可见。
 
-    const basePlan = sanitizePlan(rawBasePlan, specSyncDone)
-    const effectivePlan = sanitizePlan(rawEffectivePlan, specSyncDone)
-    const source = fingerprintMarkdownTree(cwd, [changeDir])
-    // 项目自定义 proposal/design/tasks/plan 文档可能位于 changeDir 之外（args.*Doc 显式覆盖）；
-    // 它们同样是 Plan 的证据基础，必须进入 fingerprint，否则改了也不会失效。
-    const changeDirAbs = resolveProjectPath(cwd, changeDir)
-    const extraSourceDocs = [...new Set(
+    const basePlan = rawBasePlan ? sanitizePlan(rawBasePlan, specSyncDone) : null
+    const effectivePlan = rawEffectivePlan ? sanitizePlan(rawEffectivePlan, specSyncDone) : null
+    // changeDir=null(非 OpenSpec 链):source 显式 kind='none',validateState 对其恒 sourceValid=false,
+    // 永不进 TRUSTED(trustCeiling=A);digest=null 杜绝 sha256('') 空集碰撞假 valid(根因 RC1b)。
+    const source = changeDir
+      ? fingerprintMarkdownTree(cwd, [changeDir])
+      : { kind: 'none', roots: [], digest: null, files: [] }
+    // 项目自定义 proposal/design/tasks/plan 文档可能位于 changeDir 之外(args.*Doc 显式覆盖);
+    // 它们同样是 Plan 的证据基础,必须进入 fingerprint,否则改了也不会失效。
+    const changeDirAbs = changeDir ? resolveProjectPath(cwd, changeDir) : null
+    const extraSourceDocs = changeDirAbs ? [...new Set(
       [runArgs.proposalDoc, runArgs.designDoc, runArgs.tasksDoc, runArgs.planDoc]
         .filter(p => typeof p === 'string' && p && !rejectPlaceholder(p))
         .map(p => resolveProjectPath(cwd, p))
-        .filter(abs => abs && changeDirAbs && !isUnderDir(abs, changeDirAbs))
-    )]
+        .filter(abs => abs && !isUnderDir(abs, changeDirAbs))
+    )] : []
     const sourceExtra = extraSourceDocs.length ? fingerprintExactFiles(cwd, extraSourceDocs) : null
     const code = fingerprintExactFiles(cwd, collectPlanCodePaths(rawBasePlan, rawEffectivePlan))
-    // resume 的 args 是全量替换不是合并：必须保存首轮完整 args，否则 native resume 时
+    // resume 的 args 是全量替换不是合并:必须保存首轮完整 args,否则 native resume 时
     // 脚本回退 <占位> 默认值 → prompt/route/model 变化 → Plan 及以后粘滞 miss。
-    // priorState/checkpointValidation 是恢复通道自身的载体，递归保存会让 state 逐代膨胀。
+    // priorState/checkpointValidation 是恢复通道自身的载体,递归保存会让 state 逐代膨胀。
     const resumeArgs = cloneJson(runArgs) || {}
     delete resumeArgs.priorState
     delete resumeArgs.checkpointValidation
-    // 实现已执行但 Verify 未绿（失败/escalate/中途 Stop）：fingerprint 对着 partial workspace
-    // 计算，而 Reviewer 从未审过这份代码。标 dirty，禁止直接 Plan/Review ARTIFACT HIT。
+    // 实现已执行但 Verify 未绿(失败/escalate/中途 Stop):fingerprint 对着 partial workspace
+    // 计算,而 Reviewer 从未审过这份代码。标 dirty,禁止直接 Plan/Review ARTIFACT HIT。
     const reachedImplementation = !!(result.impl || result.verify || result.audit || result.commitResult
       || ['Implement', 'Verify', 'Audit', 'Commit'].includes(result.at))
     const dirtyWorktree = reachedImplementation && result.verify?.status !== 'green'
+    // live 通道内部强制(latestFeedback):调用方无需预知 cacheVersion ——
+    // cacheVersion<1 的建档一律 legacy,绝不冒充可信档;与 backfill 的 legacyUnverified:true 对齐。
+    const legacy = legacyUnverified || cacheVersion < 1
+
+    const statePath = statePathForKey(cwd, checkpointKey)
+    // 防降级双向守卫:已有可信档(legacyUnverified=false)不得被 legacy 档覆盖;
+    // 与 backfillStates 的「existing 非 legacy → continue」对齐(live 通道同规则)。
+    if (legacy) {
+      const existing = readJson(statePath)
+      if (existing && existing.legacyUnverified === false) return { skipped: 'trusted-state-exists' }
+    }
+
     const state = {
       schemaVersion: STATE_SCHEMA_VERSION,
       cacheVersion,
       kind: 'ultracode-semantic-state',
+      templateKind: firstString(result.checkpoint?.kind, result.templateKind) || null,
       checkpointKey,
       updatedAt: run.timestamp || new Date().toISOString(),
       runId: run.runId || null,
@@ -317,7 +420,7 @@ function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = fals
       scriptPath: run.scriptPath || null,
       scriptSha1: run.script ? sha1(run.script) : null,
       task,
-      changeDir: storedPath(cwd, changeDir),
+      changeDir: changeDir ? storedPath(cwd, changeDir) : null,
       milestone,
       resumeArgs,
       dirtyWorktree,
@@ -327,19 +430,21 @@ function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = fals
       effectivePlan,
       review: cloneJson(result.review),
       decisionApply: cloneJson(result.decisionApply) || { decisions: {} },
+      // need-decision 双通道(needDecisionChannel=A):新 decisionPoints 优先,旧字符串 questions 兼容。
+      decisionPoints: cloneJson(result.decisionPoints) ?? null,
+      questions: cloneJson(result.openQuestionsForUser ?? result.questions) ?? null,
       routing: cloneJson(result.routing),
       patchRounds: result.patchRounds ?? 0,
       specSyncDone,
-      legacyUnverified: !!legacyUnverified,
-      appliedOpenSpecEdits: specSyncDone ? cloneJson(rawEffectivePlan.openspecEdits || []) : [],
+      legacyUnverified: legacy,
+      appliedOpenSpecEdits: specSyncDone ? cloneJson(rawEffectivePlan?.openspecEdits || []) : [],
       fingerprint: { source, sourceExtra, code },
     }
 
-    const statePath = statePathForKey(cwd, checkpointKey)
-    if (!writeJson(statePath, state)) return null
+    if (!writeJson(statePath, state)) return { skipped: 'write-failed' }
     return { statePath, state }
   } catch {
-    return null
+    return { skipped: 'build-exception' }
   }
 }
 
@@ -379,14 +484,22 @@ function backfillStates(cwd) {
   } catch {
     return 0
   }
-  let built = 0
+  // .rN 版本化(harvest v2)后,同一 runId 可能有 wf_x.json / wf_x.r2.json 多个版本:
+  // 按 runId(strip .rN 后缀)分组,每组只取 mtime 最新版本建档,替代脆弱的纯时间序守卫。
+  const latestByRun = new Map()
   for (const x of files) {
+    const runId = x.f.replace(/\.json$/, '').replace(/\.r\d+$/, '')
+    const prev = latestByRun.get(runId)
+    if (!prev || x.mtime >= prev.mtime) latestByRun.set(runId, { ...x, runId })
+  }
+  let built = 0
+  for (const x of latestByRun.values()) {
     const run = readJson(path.join(rawDir, x.f))
     if (!run) continue
     const inferred = inferCheckpoint(run, cwd)
-    if (!inferred) continue
+    if (!inferred.ok) continue
     const existing = readJson(statePathForKey(cwd, inferred.checkpointKey))
-    // 已有可信 v0.4 state 永远不能被旧 raw 降级覆盖。legacy state 也只接受时间更新的 raw，
+    // 已有可信 v0.4 state 永远不能被旧 raw 降级覆盖。legacy state 也只接受时间更新的 raw,
     // 避免每个 Stop 都重写同一 state / 刷新 mtime 干扰候选排序。
     if (existing && !existing.legacyUnverified) continue
     if (existing?.updatedAt && run.timestamp) {
@@ -394,11 +507,11 @@ function backfillStates(cwd) {
       const runTs = Date.parse(run.timestamp)
       if (Number.isFinite(oldTs) && Number.isFinite(runTs) && oldTs >= runTs) continue
     }
-    const runId = run.runId || x.f.replace(/\.json$/, '')
+    const runId = run.runId || x.runId
     const sessionId = findSessionForRun(cwd, runId)
-    // 旧 raw 没有生成当时的 fingerprint，绝不能用今天计算的 hash 冒充历史基线。
-    // 这类 state 只可用于 native resume；否则必须先走廉价 CheckpointValidate。
-    if (buildStateFromRun({ run, cwd, sessionId, legacyUnverified: true })) built++
+    // 旧 raw 没有生成当时的 fingerprint,绝不能用今天计算的 hash 冒充历史基线。
+    // 这类 state 只可用于 native resume;否则必须先走廉价 CheckpointValidate。
+    if (buildStateFromRun({ run, cwd, sessionId, legacyUnverified: true }).state) built++
   }
   return built
 }
@@ -499,6 +612,9 @@ function resolveCheckpointCandidates({ cwd, sessionId = null, requirement = '', 
       sessionId: state.sessionId,
       cacheVersion: state.cacheVersion,
       legacyUnverified: !!state.legacyUnverified,
+      // sourceKind 直接暴露在候选行:主 agent 不必逐候选 Read state JSON
+      // 就能区分「普通 valid=false 禁复用」与「kind=none 预期内」。
+      sourceKind: state.fingerprint?.source?.kind ?? 'none',
       dirtyWorktree: dirty,
       reviewReusable: !dirty,
       validation: validateState(cwd, state, cache),
@@ -516,4 +632,8 @@ module.exports = {
   resolveCheckpointCandidates,
   validateState,
   journalExists,
+  // 供 harvest live 通道预判与 tools/verify-state-pipeline.mjs 干跑使用(latestFeedback:
+  // inferCheckpoint 未导出时「live 强制 legacy」与「LDL_UGC backfill 干跑」均不可实现)。
+  inferCheckpoint,
+  fnv1aHex,
 }

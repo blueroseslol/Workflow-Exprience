@@ -49,7 +49,7 @@ function main() {
     const rows = candidates.map((c, i) => {
       const changed = c.validation.changedPaths.slice(0, 5).join(',') || '-'
       return `#${i + 1} path=${c.path} key=${c.checkpointKey} change=${c.changeDir} milestone=${c.milestone} ` +
-        `valid=${c.validation.valid} legacy=${c.legacyUnverified} dirty=${c.dirtyWorktree} nativeResume=${c.nativeResumeEligible} runId=${c.runId || '-'} ` +
+        `valid=${c.validation.valid} legacy=${c.legacyUnverified} dirty=${c.dirtyWorktree} sourceKind=${c.sourceKind} nativeResume=${c.nativeResumeEligible} runId=${c.runId || '-'} ` +
         `scriptPath=${c.scriptPath || '-'} changed=${changed}`
     })
     checkpointContext =
@@ -61,7 +61,9 @@ function main() {
       'args.checkpointValidation={valid:true,sourceValid:true,codeValid:true,legacyUnverified:false,changedPaths:[],dirtyWorktree:<对应行 dirty 值>}；' +
       'dirty=true（上轮实现未完成或 Verify 未绿）时即使 valid=true 也禁止直接 Plan/Review HIT，模板会先廉价 CheckpointValidate；' +
       '若 legacy=true 且 nativeResume=false，可 Read state 并传 args.checkpointValidation={valid:false,legacyUnverified:true,changedPaths:["<legacy-unverified>"]}，' +
-      'OpenSpec 模板会先用廉价 Recon 模型做 CheckpointValidate，验证通过才跳过 BasePlan/Review；' +
+      '模板会先用廉价 Recon 模型做 CheckpointValidate，验证通过才跳过 BasePlan/Review；' +
+      'sourceKind=none（非 OpenSpec 链无 markdown 指纹）的候选 valid 恒 false 属预期内：只可走 nativeResume，' +
+      '或传 args.checkpointValidation（如实填 codeValid/sourceValid）走模板 CheckpointValidate 第四门，禁止直接 ARTIFACT HIT；' +
       '普通 valid=false 且 legacy=false 时禁止复用历史 Plan/Review，只把 changedPaths 当失效证据。'
   }
 

@@ -45,9 +45,12 @@ const CHECKPOINT_META = {
   kind: 'openspec-incremental-v4', cacheVersion: CHECKPOINT_CACHE_VERSION, key: CHECKPOINT_KEY,
   task: TASK, changeDir: CHANGE_DIR, milestone: MILESTONE,
 }
+// v0.4.3：legacyUnverified 档（cacheVersion=0 存量回填）同样可进 STATE_COMPATIBLE ——
+// 信任不由 cacheVersion 数值担保,而由 LEGACY 门强制 CheckpointValidate 担保;
+// 绝不伪造 cacheVersion=1(legacyStatePolicy=A),格式兼容即可。
 const STATE_COMPATIBLE = !!(
   PRIOR_STATE && PRIOR_STATE.kind === 'ultracode-semantic-state' &&
-  PRIOR_STATE.cacheVersion === CHECKPOINT_CACHE_VERSION &&
+  (PRIOR_STATE.cacheVersion === CHECKPOINT_CACHE_VERSION || PRIOR_STATE.legacyUnverified === true) &&
   PRIOR_STATE.checkpointKey === CHECKPOINT_KEY
 )
 // dirtyWorktree：上轮实现已动 workspace 但 Verify 未绿。fingerprint 对着 partial workspace
@@ -56,7 +59,11 @@ const PRIOR_DIRTY = !!(PRIOR_STATE?.dirtyWorktree === true || CHECKPOINT_VALIDAT
 const TRUSTED_ARTIFACT_REUSE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && !PRIOR_DIRTY && CHECKPOINT_VALIDATION?.valid === true)
 const LEGACY_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && PRIOR_STATE?.legacyUnverified && CHECKPOINT_VALIDATION?.legacyUnverified === true)
 const DIRTY_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && PRIOR_DIRTY && CHECKPOINT_VALIDATION?.valid === true)
-const NEEDS_CHECKPOINT_VALIDATE = LEGACY_ARTIFACT_CANDIDATE || DIRTY_ARTIFACT_CANDIDATE
+// kind=none 第四门(v0.4.3):非 OpenSpec 链的 state 无 markdown 指纹,sourceValid 恒 false,
+// 上面三门全不成立;codeValid=true 且未 dirty 时给 CheckpointValidate 落点,禁止直接 TRUSTED。
+const KINDNONE_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && !PRIOR_DIRTY &&
+  CHECKPOINT_VALIDATION?.codeValid === true && CHECKPOINT_VALIDATION?.sourceValid === false)
+const NEEDS_CHECKPOINT_VALIDATE = LEGACY_ARTIFACT_CANDIDATE || DIRTY_ARTIFACT_CANDIDATE || KINDNONE_ARTIFACT_CANDIDATE
 const ARTIFACT_REUSE = TRUSTED_ARTIFACT_REUSE || NEEDS_CHECKPOINT_VALIDATE
 
 const MODEL_RECON = args?.reconModel ?? 'haiku'
@@ -230,6 +237,7 @@ if(NEEDS_CHECKPOINT_VALIDATE&&PRIOR_STATE?.basePlan){
 ${digest(PRIOR_STATE.basePlan)}`,
     PRIOR_STATE?.review?`历史 Review verdict=${PRIOR_STATE.review.verdict}`:'历史 Review 缺失',
     PRIOR_DIRTY?'上轮实现未完成或 Verify 未绿（dirtyWorktree）：除 OpenSpec/代码漂移外，还必须核实已写入 workspace 的部分实现不推翻 Plan/Review 结论；无法核实即 false。':'',
+    PRIOR_STATE?.fingerprint?.source?.kind==='none'?'该 state 来自非 OpenSpec 链(sourceKind=none):无 OpenSpec markdown 指纹属预期,重点核实代码侧漂移(slices/whitelist 涉及文件)与任务前提是否仍成立。':'',
     '必须亲自定向 Read 当前 proposal/design/tasks/specs，并 Read 历史 slices/whitelist 涉及的代码；可用刚完成的 Recon/GitNexus 结果导航，但不得只信历史摘要。',
     'planStillValid=true 仅当根因/切片/whitelist/tests/contract 仍成立；reviewStillValid=true 还要求历史 verdict=approve 且没有出现会推翻该审阅的新依赖/风险。',
     'requiresArchitect=true 仅当失效修复涉及架构/public API/schema/cross-repo contract/concurrency/state ownership/persistence/migration/security；机械/局部修复为 false。',

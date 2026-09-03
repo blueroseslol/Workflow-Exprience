@@ -15,6 +15,14 @@
  *     会让对话继续一整轮，固化应当是静默的）
  *   - 跨轮次游标：workflow 是后台任务，Stop 触发时文件可能还没落盘，要等几轮
  *   - 任何异常都静默 exit 0 —— hook 绝不能阻断用户的会话
+ *
+ * v0.4.3（拍板语义）：
+ *   - 游标从 runId 去重改为 runId→四字段指纹（status+result.status+agentCount+totalTokens）：
+ *     原生 resume 原地覆写同一 wf_*.json 后指纹必变 → 终态重收（根因 RC3）
+ *   - raw 版本化：首轮 wf_x.json 永不覆写，续收写 wf_x.r2.json/.r3.json（保留早退证据）
+ *   - index.jsonl append-only：同 runId 允许多行，entry 带 rawFile/resultStatus
+ *   - 比对走公共路径：cursor.fps 缺失时读 rawDir 最新版本算 fp，绝不凭引擎 status 判一致
+ *     （index entry 的 status 是引擎 completed/killed，两轮同为 completed 会假一致）
  */
 
 const fs = require('fs')
@@ -24,6 +32,7 @@ const crypto = require('crypto')
 const { buildStateFromRun, backfillStates } = require('./checkpoint-lib.cjs')
 
 const MAX_SCAN = 200 // 单次最多处理的 wf 文件数，防御性上限
+const MAX_CURSOR = 500 // done/fps 游标上限，fps 与 done 同步淘汰
 
 function main() {
   let input = ''
@@ -50,9 +59,12 @@ function main() {
   const runsDir = findWorkflowsDir(sessionId)
   if (!runsDir) return
 
-  const cursorPath = path.join(os.tmpdir(), `wfharvest-${sha256(sessionId).slice(0, 16)}.json`)
-  const cursor = readJson(cursorPath) || { done: [] }
-  const done = new Set(cursor.done)
+  // v2 游标：文件名带版本段,0.4.3 对旧 v1 游标天然全量重扫(按 fp 比对,不盲重收)。
+  const cursorPath = path.join(os.tmpdir(), `wfharvest-v2-${sha256(sessionId).slice(0, 16)}.json`)
+  const cursor = readJson(cursorPath) || { done: [], fps: {}, warned: {} }
+  if (!cursor.fps || typeof cursor.fps !== 'object') cursor.fps = {}
+  if (!cursor.warned || typeof cursor.warned !== 'object') cursor.warned = {}
+  const done = new Set(Array.isArray(cursor.done) ? cursor.done : [])
 
   let files
   try {
@@ -77,7 +89,6 @@ function main() {
 
   for (const f of files) {
     const runId = f.replace(/\.json$/, '')
-    if (done.has(runId)) continue
 
     const run = readJson(path.join(runsDir, f))
     if (!run) continue
@@ -86,18 +97,44 @@ function main() {
     const status = run.status
     if (!status || status === 'running') continue
 
+    // 四字段指纹(拍板 harvestFingerprint=A,不加 mtime):
+    // resume 原地覆写后 result.status/agentCount/totalTokens 至少一项必变 → 重收。
+    const fpNow = runFingerprint(run)
+    // 公共路径比对(latestFeedback):cursor 无记录时读 rawDir 最新版本算 fp ——
+    // v1→v2 迁移窗口(journal 已被 resume 覆写)与 fps 淘汰窗口都靠它兜底,
+    // 绝不凭引擎 run.status 判一致(两轮同为 completed 会假一致漏收)。
+    const fpRecorded = cursor.fps[runId] ?? fingerprintRawLatest(rawDir, runId)
+    if (fpRecorded && fpRecorded === fpNow) {
+      cursor.fps[runId] = fpNow
+      done.add(runId)
+      continue
+    }
+
     try {
       fs.mkdirSync(rawDir, { recursive: true })
-      fs.copyFileSync(path.join(runsDir, f), path.join(rawDir, f))
+      // raw 版本化(拍板 rawWritePolicy=B):首轮永不覆写,续收写 .r2/.r3。
+      const rawFile = nextRawFileName(rawDir, runId)
+      fs.copyFileSync(path.join(runsDir, f), path.join(rawDir, rawFile))
       // raw 是不可变历史；state 是最新可恢复 Plan/Review checkpoint。当前 run 在 Stop 时刻
       // 直接建立可信 fingerprint；与历史 backfill 的 legacyUnverified 明确区分。
-      buildStateFromRun({ run, cwd, sessionId })
+      // buildStateFromRun 内部对 cacheVersion<1 强制 legacyUnverified(live 通道同规则)。
+      const built = buildStateFromRun({ run, cwd, sessionId })
+      if (built?.skipped) {
+        warnOnce(cursor, indexPath, `state-build-skipped:${runId}:${built.skipped}`, {
+          warn: 'state-build-skipped',
+          runId,
+          reason: built.skipped,
+          sessionId,
+        })
+      }
 
       const entry = {
         runId: run.runId || runId,
         ts: run.timestamp || null,
         workflowName: run.workflowName || null,
         status,
+        resultStatus: run.result?.status ?? null,
+        rawFile,
         agentCount: run.agentCount ?? null,
         totalTokens: run.totalTokens ?? null,
         totalToolCalls: run.totalToolCalls ?? null,
@@ -113,6 +150,7 @@ function main() {
       // 需求 8 写入侧：同一次 hook 调用顺带写进度，省一次 hook
       appendProgress(progressDir, sessionId, entry)
 
+      cursor.fps[runId] = fpNow
       done.add(runId)
       harvested++
     } catch {
@@ -124,22 +162,79 @@ function main() {
   if (harvested === 0 && files.length === 0) {
     try {
       fs.mkdirSync(docsDir, { recursive: true })
-      const warnKey = 'snapshot-not-on-disk'
-      if (!cursor.warned || cursor.warned !== warnKey) {
-        fs.appendFileSync(
-          indexPath,
-          JSON.stringify({ warn: warnKey, note: 'workflows 目录为空，本地快照可能未落盘', sessionId }) + '\n',
-          'utf8'
-        )
-        cursor.warned = warnKey
-      }
+      warnOnce(cursor, indexPath, 'snapshot-not-on-disk', {
+        warn: 'snapshot-not-on-disk',
+        note: 'workflows 目录为空，本地快照可能未落盘',
+        sessionId,
+      })
     } catch {
       /* ignore */
     }
   }
 
-  cursor.done = [...done].slice(-500) // 只保留最近 500 个，防止游标无限增长
+  // done/fps 同步淘汰(latestFeedback:fps 无界增长):只保留最近 MAX_CURSOR 个 runId。
+  cursor.done = [...done].slice(-MAX_CURSOR)
+  const kept = new Set(cursor.done)
+  for (const k of Object.keys(cursor.fps)) if (!kept.has(k)) delete cursor.fps[k]
   writeJson(cursorPath, cursor)
+}
+
+// 四字段终态指纹:任何一项变化都代表 run 进入了新终态。
+function runFingerprint(run) {
+  return sha256([
+    String(run?.status ?? ''),
+    String(run?.result?.status ?? ''),
+    String(run?.agentCount ?? ''),
+    String(run?.totalTokens ?? ''),
+  ].join('|'))
+}
+
+// rawDir 中某 runId 的最新版本文件名(wf_x.json 为 rev 1,.r2/.r3 依次)。
+function latestRawFile(rawDir, runId) {
+  let names
+  try {
+    names = fs.readdirSync(rawDir)
+  } catch {
+    return null
+  }
+  let best = null
+  let bestRev = 0
+  for (const n of names) {
+    const m = n.match(new RegExp(`^${runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.r(\\d+))?\\.json$`))
+    if (!m) continue
+    const rev = m[1] ? Number(m[1]) : 1
+    if (rev >= bestRev) { best = n; bestRev = rev }
+  }
+  return best
+}
+
+// 读取 rawDir 最新版本并算同口径指纹;不存在 → null(fp 未知 → 按已变化处理)。
+function fingerprintRawLatest(rawDir, runId) {
+  const latest = latestRawFile(rawDir, runId)
+  if (!latest) return null
+  const run = readJson(path.join(rawDir, latest))
+  if (!run) return null
+  return runFingerprint(run)
+}
+
+// 下一个版本文件名:首轮 wf_x.json 已存在则写 .r2/.r3(取最大序号+1),首轮永不覆写。
+function nextRawFileName(rawDir, runId) {
+  const latest = latestRawFile(rawDir, runId)
+  if (!latest) return `${runId}.json`
+  const m = latest.match(/\.r(\d+)\.json$/)
+  const nextRev = m ? Number(m[1]) + 1 : 2
+  return `${runId}.r${nextRev}.json`
+}
+
+// warn 防刷屏:同一 key 每个 cursor 生命周期只写一行(沿用 snapshot-not-on-disk 语义)。
+function warnOnce(cursor, indexPath, key, row) {
+  if (cursor.warned[key]) return
+  try {
+    fs.appendFileSync(indexPath, JSON.stringify(row) + '\n', 'utf8')
+    cursor.warned[key] = true
+  } catch {
+    /* ignore */
+  }
 }
 
 function appendProgress(progressDir, sessionId, entry) {
@@ -151,8 +246,9 @@ function appendProgress(progressDir, sessionId, entry) {
       runId: entry.runId,
       workflowName: entry.workflowName,
       status: entry.status,
+      resultStatus: entry.resultStatus ?? null,
       agentCount: entry.agentCount,
-      summary: `${entry.workflowName || 'workflow'} → ${entry.status}（${entry.agentCount ?? '?'} agents）`,
+      summary: `${entry.workflowName || 'workflow'} → ${entry.status}${entry.resultStatus ? `(${entry.resultStatus})` : ''}（${entry.agentCount ?? '?'} agents）`,
     }
     fs.appendFileSync(path.join(progressDir, `${sessionId}.jsonl`), JSON.stringify(line) + '\n', 'utf8')
   } catch {
@@ -162,7 +258,8 @@ function appendProgress(progressDir, sessionId, entry) {
 
 /** 不自己实现 projectDir 编码规则，直接按 sessionId 目录名去找 */
 function findWorkflowsDir(sessionId) {
-  const projects = path.join(os.homedir(), '.claude', 'projects')
+  // env 覆盖主要给测试用（与 checkpoint-lib projectsDir 同款）；生产默认 ~/.claude/projects
+  const projects = process.env.ULTRACODE_PROJECTS_DIR || path.join(os.homedir(), '.claude', 'projects')
   let dirs
   try {
     dirs = fs.readdirSync(projects, { withFileTypes: true }).filter(d => d.isDirectory())
