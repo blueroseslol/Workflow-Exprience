@@ -38,7 +38,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 - OpenSpec-first 用户拍板：同 session resume + `args.decisions`；BasePlan prompt 不含 decisions，因此 BasePlan 应命中；普通选择由 JS Apply，架构选择才跑 Opus PlanDelta；
 - `need-decision` 跨 session：Git 中最新 OpenSpec artifacts 是第一 planning checkpoint，再辅以 `docs/ultracode/raw/` 与 `.claude/progress/*.jsonl`。
 
-**持久语义缓存 v0.4.1**：hook 注入 `[Ultracode checkpoint resolver]` 先判候选：`nativeResume=true` 用原 `scriptPath+resumeFromRunId`+`resumeArgs` 全量；`valid=true` → Read state 传 `priorState/checkpointKey/checkpointValidation` 走 ARTIFACT HIT；`dirty`/`legacy` 禁直接 hit，先 haiku CheckpointValidate；`valid=false` 禁复用。
+**持久语义缓存 v0.4.3**：hook 注入 `[Ultracode checkpoint resolver]` 先判候选：`nativeResume=true` 用原 `scriptPath+resumeFromRunId`+`resumeArgs` 全量；`valid=true` → 传 `priorState/checkpointKey/checkpointValidation` 走 ARTIFACT HIT；`dirty`/`legacy`/`sourceKind=none` 禁直接 hit，先 haiku CheckpointValidate；`valid=false` 禁复用。harvest 按四字段指纹续收 resume 终态，raw 版本化 .rN；gitnexus 链 decisions 已移出 Plan prompt（JS DecisionApply）。
 
 ## 索引（按需 Read）
 
@@ -76,9 +76,9 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 
 **Opus 门**：新增/改变 architecture boundary、public API/schema、cross-repo contract、concurrency/lifecycle/state-machine ownership、persistence/migration/security 语义，或 Reviewer 用证据推翻原架构假设。单纯高 blast radius 但 OpenSpec design 已完整覆盖，不自动要求 Opus 重写 Plan；高风险仍由 Review/Verify/Audit 兜底。
 
-**effort 本机差异**：当前逻辑 `haiku + max` 可能在 CLI 层被直接吞掉，`sonnet + xhigh` 会静默降级；不要把 effort 当成唯一质量门，仍要用退出码、测试计数、原始输出和基线对比。
+**effort 本机差异**：`haiku+max` 可能被吞、`sonnet+xhigh` 降级；以退出码/测试计数为准，不唯 effort。
 
-**Haiku 类型模型兼容规则**：本次 workflow 明确需要传 effort 时，首试 `max`；仅在 runtime/provider **明确返回 effort/reasoning level/thinking capability 不支持**时，按 `max → xhigh → high` 依次重试。`high` 仍不支持就停止自动降级并提示用户选择“省略 effort 使用模型默认策略”或“换支持 effort 的模型”。`null`、超时、schema/鉴权/限流/网络错误不得误判为 capability mismatch，也不得静默省略 effort。详见 `references/model-effort.md` / `references/schemas.md`。
+**Haiku 类模型 effort 规则**：首试 `max`，明确不支持才 `max→xhigh→high` 重试；`null`/超时/鉴权错误不得误判为不支持。详见 `references/model-effort.md`。
 
 **动态路由**见 `references/dynamic-routing.md`。**Codex 覆盖默认关闭**：Review/Audit 仍是 `fable`；只有用户明确要求时，authoring 阶段才按 `references/codex-cli.md` 改写本次 workflow。
 

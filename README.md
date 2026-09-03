@@ -84,19 +84,22 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 │       └── pitfalls.md        十条踩坑记忆
 ├── templates/               可粘贴成品脚本（核心交付物）
 │   ├── four-phase.js          Plan→Review→Preflight→Implement→Verify（默认 baseline）
-│   ├── gitnexus-routed.js     动态路由：Recon→JS评分→派生模型链→对抗Review（实验）
+│   ├── gitnexus-routed.js     动态路由：Recon→JS评分→派生模型链→对抗Review + checkpoint 消费（v0.4.3）
+│   ├── openspec-incremental.js OpenSpec-first 增量执行：BasePlan overlay→DecisionApply→PlanPatch→SpecSync
 │   ├── stage-with-gates.js    拍板边界模板（一个决议一个 workflow）
 │   └── readonly-recon.js      只读调研
 ├── commands/
 │   └── workflow.md            /workflow-experience:workflow 命令入口
 ├── hooks/                   四个 hook，全部实测通过
 │   ├── hooks.json
-│   ├── harvest-workflow.cjs   Stop：固化 run + 写进度
+│   ├── checkpoint-lib.cjs     语义 checkpoint：建档/验证/resolver/backfill（v0.4.3 legacy+kind=none）
+│   ├── harvest-workflow.cjs   Stop：固化 run + 写进度（v0.4.3 指纹续收 + raw .rN 版本化）
 │   ├── skill-pointer.cjs      PreToolUse(Skill)：注入一行路径指针
 │   ├── peer-progress.cjs      SessionStart：注入其他会话的新进度
-│   └── workflow-intake.cjs    UserPromptSubmit：workflow 前缀 → 意图路由
+│   └── workflow-intake.cjs    UserPromptSubmit：workflow 前缀 → 意图路由 + checkpoint resolver
 ├── tools/
-│   └── scan-corpus.mjs      人工触发的语料分析（替代被砍掉的自动闭环）
+│   ├── scan-corpus.mjs      人工触发的语料分析（替代被砍掉的自动闭环）
+│   └── verify-state-pipeline.mjs 语义缓存管道端到端检查（v0.4.3，含 LDL_UGC 干跑）
 ├── legacy/                  codex 深链接接力（独立能力，不参与 plugin 打包）
 └── docs/decisions/          ADR
 ```

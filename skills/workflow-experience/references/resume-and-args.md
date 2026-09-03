@@ -28,16 +28,16 @@ cacheKey = sha256(前序调用滚动链 ‖ prompt ‖ 归一化后的 opts)
 
 ## resume 的真实限制 ⚠️
 
-### 限制 1：same-session only
+### 限制 1：same-session only（有实测反例，按【不确定】处理）
 
 journal 路径含 sessionId：
 ```
 ~/.claude/projects/<项目>/<sessionId>/subagents/workflows/<runId>/journal.jsonl
 ```
 
-`/clear`、崩溃、跨天重启 → sessionId 变化 → 读不到 journal → **返回空缓存且不报错** → 静默全量重跑。
+`/clear`、崩溃、跨天重启 → sessionId 变化 → 按路径规则读不到 journal → **预期返回空缓存且不报错** → 静默全量重跑。
 
-**这正是「等用户拍板」最容易踩的坑** —— 拍板往往隔了一夜，会话早就换了。
+⚠️ v0.4.3 取证修正：观测到一例跨 sessionId（09-01 首轮 → 09-02 续跑）recon 仍 `cached:true`（LDL_UGC wf_a3e6f350-d65）。journal 按 sessionId 索引，真跨 session 物理上读不到该文件，最可能解释是该 session 跨天存活而非跨 session 命中 —— **机制未明，不得当作「跨 session 可用」的证据，也不得再断言「跨 session 必失效」。保守策略：按不可用处理，跨 session 优先走 Semantic Artifact Restore。**
 
 ### 限制 2：脚本一字节不能改
 
@@ -62,7 +62,7 @@ journal 路径含 sessionId：
 |---|---|---|
 | 保存什么 | 计算缓存（agent 结果） | 开发状态（plan / routing / 决议 / 进度） |
 | 机制 | 同 scriptPath + `resumeFromRunId` + 新 args | 新脚本，上轮结论抄进 `COMMON` |
-| 前提 | 同 session、脚本一字节未改 | 无 —— 跨 session 的唯一选择 |
+| 前提 | 同 session、脚本一字节未改（跨 session 是否命中未确证，见限制 1，保守按不可用） | 无 —— 跨 session 的唯一选择 |
 | 成本 | 未变前缀全部 CACHE HIT | 重跑只读 recon（中位 ~10 万 token） |
 
 **按早退状态分流：**
@@ -79,7 +79,7 @@ journal 路径含 sessionId：
 
 2. `need-decision` —— 必须等用户拍板：
    - 用户**同 session 立即回答** → resume + `args.decisions`（1..N-1 全命中）
-   - **已跨 session**（隔夜、`/clear`、重启）→ journal 已失效，resume 会**静默全量重跑** —— 用 checkpoint：新脚本抄结论进 `COMMON`，并从 harvest 固化的 `docs/ultracode/raw/wf_*.json` 读上轮完整 result（plan / routing / decisions）作为输入；`.claude/progress/*.jsonl` 提供跨会话进度摘要
+   - **已跨 session**（隔夜、`/clear`、重启）→ journal 预期失效（有一例跨 session recon cached:true 的未确证反例，见限制 1；保守按失效处理）→ resume 预期**静默全量重跑** —— 用 checkpoint：新脚本抄结论进 `COMMON`，并从 harvest 固化的 `docs/ultracode/raw/wf_*.json` 读上轮完整 result（plan / routing / decisions）作为输入；`.claude/progress/*.jsonl` 提供跨会话进度摘要
 
 ⚠️ **resume 的 args 是全量替换，不是合并**：首轮 args（`repo` / `task` / `milestone` / `ts`…）必须原样带上再叠加 `nextArgs` / `decisions`，否则脚本回退到 `<占位>` 默认值。
 
@@ -108,6 +108,14 @@ v0.4.1 起 fingerprint 覆盖扩大：代码侧为 `whitelist + slices.files + m
 **为什么 legacy 不能直接 hash 回填**：旧 raw 并没有保存“当时的文件 hash”。如果今天才对当前 workspace 求 hash，再把它写进旧 state，会把未知历史状态伪装成“验证通过”。因此旧记录必须 native resume 或先廉价语义验证；从 v0.4 开始的新 run 才有可信 fingerprint。
 
 **插件重装/升级本身不再等于 Plan cache 全失效**——只要 native resume 不可用但可信 fingerprint 仍有效，就转 Semantic Artifact Cache；`cacheVersion` 变化则必须重算。
+
+## v0.4.3：harvest 指纹续收 / raw 版本化 / kind=none / legacy 建档 / gitnexus DecisionApply
+
+- **harvest 续收**：游标从 runId 去重改为 runId→四字段指纹（`status+result.status+agentCount+totalTokens`，`wfharvest-v2-<session>.json`）。原生 resume 原地覆写同一 wf 文件后指纹必变 → 终态重收；raw 首轮永不覆写，续收写 `wf_<id>.r2.json/.r3.json`（保留早退证据）；index.jsonl 保持 append-only（同 runId 多行，entry 带 `resultStatus`/`rawFile`）。⚠️ scan-corpus.mjs 会把 `.rN` 计为独立 run，token/run 聚合在「去重另开」完成前系统性虚高 —— 统计口径修复另开，本版不带。
+- **legacy 建档**：无 checkpoint meta 的存量 run 建 `cacheVersion=0 + legacyUnverified=true` 档（绝不伪造 1）；可信档存在时 legacy 不覆盖（双向防降级）。legacy 只走 nativeResume 或先跑 haiku CheckpointValidate，模板侧 `STATE_COMPATIBLE` 已对 legacyUnverified 放松。LDL_UGC 干跑实测：21 份存量 raw 中 19 份可建档（2 份 no-result/no-slices 拒建）。
+- **kind=none**：非 OpenSpec 链无 markdown 指纹，`fingerprint.source.kind='none'` 的 state `sourceValid` 恒 false、永不进 TRUSTED；走模板第四门（`codeValid=true && sourceValid=false && !dirty` → CheckpointValidate）。空 markdown 树（changeDir 推断到不存在目录）同样 fail-closed，杜绝 `sha256('')` 空集碰撞假 valid。`changeDir=null` 时 checkpointKey 为 `nochg:<fnv1a(task)>::<milestone>`（模板与 hook 同公式，防 `null::` 碰撞）。
+- **gitnexus 链 DecisionApply**：decisions 不再进 Plan prompt（成本红线 #1 修复）；拍板点由 Planner 预编码 `decisionPoints`（slice id 必填），续跑 JS `applyDecisions` 0 token 应用；`openQuestionsForUser` 不再触发 need-decision 早退（防 resume 死循环），**字符串答案只约束 Implement 层现场裁决、不改 Plan** —— 拍板内容经 Implement/Advisor prompt 透传。需要架构级吸收的拍板项（requiresArchitect）本链无 PlanDelta，由 Review/Audit 对抗兜底。
+- **范围声明**：对抗审 Reviewer 连打多轮 revise 的 token 损耗（LDL_UGC 9.1 一例 R1→R5 五轮）不在本方案范围；`MAX_PATCH_ROUNDS` 只约束 openspec 模板内循环。
 
 ## 决议边界
 
