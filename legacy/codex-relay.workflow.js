@@ -25,6 +25,13 @@ export const meta = {
   ],
 }
 
+function llmAgent(prompt, opts = {}) {
+  return agent(prompt, {
+    ...opts,
+    disallowedTools: [...new Set([...(opts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
+  })
+}
+
 const A = args || {}
 const REPO = A.repoRoot || ''
 const GIT_ROOTS = (A.gitRoots && A.gitRoots.length) ? A.gitRoots : [REPO]
@@ -152,7 +159,7 @@ const GIT_SAFETY = [
 phase('Gate')
 log('硬门：盘点工作树 + 机械比对 codex 自述里的每个数字。不通过不进规划。')
 
-const gate = await agent(`你是 haiku 验证闸门。只读、只跑命令，不改任何生产代码，不 commit。
+const gate = await llmAgent(`你是 haiku 验证闸门。只读、只跑命令，不改任何生产代码，不 commit。
 
 交接包 JSON：${BUNDLE}
 先 Read 这个文件。它有两类内容，你只信任前一类：
@@ -201,7 +208,7 @@ log('闸门通过。自述可信度 = ' + gate.claimsVerdict + '（' + gate.clai
 
 // ================= Read（读码定位中断点） =================
 phase('Read')
-const read = await agent(`你是 haiku 读码者。只读，不改任何文件。
+const read = await llmAgent(`你是 haiku 读码者。只读，不改任何文件。
 
 交接包机器事实：${BUNDLE}（Read 它，只看 files / userDirectives / lastTurnEmpty / aborts 字段）
 仓库根：${REPO}
@@ -230,7 +237,7 @@ if (!read) return { stopped: 'read-failed', gate }
 phase('Plan')
 log('Opus 规划。输入只有：机器事实 + 验证对照表 + 用户拍板结果 + 读码结论。')
 
-const plan = await agent(`你是 Team Lead / Opus 规划者。只出计划，不改代码、不勾 checkbox、不 commit。
+const plan = await llmAgent(`你是 Team Lead / Opus 规划者。只出计划，不改代码、不勾 checkbox、不 commit。
 
 ## 接力目标（用户口述）
 ${TASK}
@@ -284,7 +291,7 @@ if (!plan || plan.verdict !== 'implementable') {
 
 // ================= Review（fable 只审计划） =================
 phase('Review')
-const review = await agent(`你是 fable。只审下面这份接力计划，不看实现、不改代码。你的默认立场是反驳而不是附和。
+const review = await llmAgent(`你是 fable。只审下面这份接力计划，不看实现、不改代码。你的默认立场是反驳而不是附和。
 
 判定：
 - approve：可执行，无硬约束违反
@@ -323,7 +330,7 @@ if (review.decision === 'revise') log('fable=revise：实现阶段必须吸收 r
 
 // ================= Implement =================
 phase('Implement')
-const impl = await agent(`你是实现者（sonnet）。必须 Read → Edit → Read（改前读、改后再读验证）。
+const impl = await llmAgent(`你是实现者（sonnet）。必须 Read → Edit → Read（改前读、改后再读验证）。
 
 只改计划白名单内的文件。不 commit、不 git add、不勾 checkbox（留给 Verify）。
 
@@ -359,7 +366,7 @@ if (!impl || !impl.ok) {
 
 // ================= Verify =================
 phase('Verify')
-const verify = await agent(`你是独立验证 haiku。不信任实现者的口述，亲自跑命令、亲自 Read。
+const verify = await llmAgent(`你是独立验证 haiku。不信任实现者的口述，亲自跑命令、亲自 Read。
 
 实现者声称：
 filesChanged=${JSON.stringify(impl.filesChanged)}
@@ -392,7 +399,7 @@ ${GIT_SAFETY}
 
 // ================= Record（固化 + 广播） =================
 phase('Record')
-const record = await agent(`你是 haiku 记录者。只写文档，不改生产代码，不再提交代码（提交已由 Verify 完成）。
+const record = await llmAgent(`你是 haiku 记录者。只写文档，不改生产代码，不再提交代码（提交已由 Verify 完成）。
 
 ## 1. 固化到 ${DOCS}
 创建/覆盖 ${DOCS}/relay-${TS.replace(/[:.]/g, '-')}.md，内容：

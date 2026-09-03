@@ -6,9 +6,16 @@ const path = require('path')
 const crypto = require('crypto')
 const os = require('os')
 
-const STATE_SCHEMA_VERSION = 1
+const STATE_SCHEMA_VERSION = 2
 const MAX_STATE_FILES = 50
 const MAX_BACKFILL_RAW = 120
+const STATE_LOCK_STALE_MS = 30_000
+const CONTINUATION_STATUSES = new Set([
+  'need-decision',
+  'route-escalation-required',
+  'replan-required',
+  'implementation-escalation-required',
+])
 
 function sha1(s) {
   return crypto.createHash('sha1').update(s).digest('hex')
@@ -16,6 +23,57 @@ function sha1(s) {
 
 function sha256(s) {
   return crypto.createHash('sha256').update(s).digest('hex')
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize)
+  if (!value || typeof value !== 'object') return value
+  const out = {}
+  for (const key of Object.keys(value).sort()) {
+    if (value[key] !== undefined) out[key] = canonicalize(value[key])
+  }
+  return out
+}
+
+function stableStringify(value) {
+  return JSON.stringify(canonicalize(value))
+}
+
+function writeJsonAtomic(p, v) {
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  const tmp = `${p}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(v, null, 2) + '\n', 'utf8')
+    fs.renameSync(tmp, p)
+    return true
+  } finally {
+    try { fs.unlinkSync(tmp) } catch { /* already renamed */ }
+  }
+}
+
+function acquireStateLock(lockPath) {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx')
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }))
+      return fd
+    } catch (error) {
+      if (error?.code !== 'EEXIST') return null
+      try {
+        if (Date.now() - fs.statSync(lockPath).mtimeMs <= STATE_LOCK_STALE_MS) return null
+        fs.unlinkSync(lockPath)
+      } catch {
+        return null
+      }
+    }
+  }
+  return null
+}
+
+function releaseStateLock(lockPath, fd) {
+  try { fs.closeSync(fd) } catch { /* best effort */ }
+  try { fs.unlinkSync(lockPath) } catch { /* best effort */ }
 }
 
 // 纯 JS FNV-1a(32-bit):workflow 模板沙箱禁 require/crypto,
@@ -127,6 +185,153 @@ function isUnderDir(abs, dirAbs) {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
 }
 
+function isDirectory(p) {
+  try { return fs.statSync(p).isDirectory() } catch { return false }
+}
+
+function isFile(p) {
+  try { return fs.statSync(p).isFile() } catch { return false }
+}
+
+function inferProjectRoot(cwd, checkpoint, result, runArgs, changeDir) {
+  const candidates = [
+    ['checkpoint', checkpoint?.projectRoot],
+    ['result', result?.projectRoot],
+    ['args.projectRoot', runArgs?.projectRoot],
+    ['args.repo', runArgs?.repo],
+    ['args.worktree', runArgs?.worktree],
+  ]
+  for (const [source, value] of candidates) {
+    if (typeof value !== 'string' || rejectPlaceholder(value)) continue
+    const resolved = resolveProjectPath(cwd, value)
+    if (isDirectory(resolved)) return { path: resolved, source }
+  }
+  const changeAbs = changeDir ? resolveProjectPath(cwd, changeDir) : null
+  if (changeAbs) {
+    const normalized = normalizeSlash(changeAbs)
+    const marker = '/openspec/changes/'
+    const i = normalized.toLowerCase().indexOf(marker)
+    if (i > 0) {
+      const inferred = path.normalize(normalized.slice(0, i))
+      if (isDirectory(inferred)) return { path: inferred, source: 'changeDir' }
+    }
+  }
+  return { path: path.resolve(cwd), source: 'cwd-fallback' }
+}
+
+function hasGlobMagic(p) {
+  return /[*?{}[\]!]/.test(String(p || ''))
+}
+
+function resolveDependency(cwd, projectRoot, value) {
+  if (typeof value !== 'string' || rejectPlaceholder(value)) return { unsupported: String(value || '') }
+  if (hasGlobMagic(value) || /[\r\n]/.test(value)) return { unsupported: value }
+  if (path.isAbsolute(value)) {
+    const abs = path.normalize(value)
+    if (!isUnderDir(abs, projectRoot)) return { unsupported: value }
+    return isFile(abs) ? { abs } : { missing: storedPath(projectRoot, abs) }
+  }
+  const roots = [...new Set([projectRoot, cwd].map(path.resolve))]
+  const matches = roots.map(root => path.resolve(root, value)).filter(isFile)
+  const unique = [...new Set(matches.map(path.normalize))]
+  if (unique.length > 1) return { ambiguous: value }
+  if (unique.length === 1) return { abs: unique[0] }
+  return { missing: normalizeSlash(value) }
+}
+
+function fingerprintPlanDependencies(cwd, projectRoot, paths) {
+  const absFiles = []
+  const missingDependencies = []
+  const unsupportedDependencies = []
+  const ambiguousDependencies = []
+  for (const value of [...new Set((paths || []).filter(Boolean))]) {
+    const resolved = resolveDependency(cwd, projectRoot, value)
+    if (resolved.abs) absFiles.push(resolved.abs)
+    else if (resolved.missing) missingDependencies.push(resolved.missing)
+    else if (resolved.ambiguous) ambiguousDependencies.push(resolved.ambiguous)
+    else unsupportedDependencies.push(resolved.unsupported)
+  }
+  const files = [...new Set(absFiles.map(p => storedPath(projectRoot, p)))].sort().map(p => fileEntry(projectRoot, p))
+  return {
+    kind: 'exact-files',
+    digest: digestEntries(files),
+    files,
+    complete: missingDependencies.length === 0 && unsupportedDependencies.length === 0 && ambiguousDependencies.length === 0,
+    missingDependencies: missingDependencies.sort(),
+    unsupportedDependencies: unsupportedDependencies.sort(),
+    ambiguousDependencies: ambiguousDependencies.sort(),
+  }
+}
+
+function globRegex(pattern) {
+  const normalized = normalizeSlash(pattern)
+  let out = '^'
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized[i]
+    if (ch === '*' && normalized[i + 1] === '*') {
+      const slash = normalized[i + 2] === '/'
+      out += slash ? '(?:.*/)?' : '.*'
+      i += slash ? 2 : 1
+    } else if (ch === '*') out += '[^/]*'
+    else if (ch === '?') out += '[^/]'
+    else out += /[\\^$+?.()|]/.test(ch) ? `\\${ch}` : ch
+  }
+  return new RegExp(out + '$', process.platform === 'win32' ? 'i' : '')
+}
+
+function walkFiles(root, out = []) {
+  let entries
+  try { entries = fs.readdirSync(root, { withFileTypes: true }) } catch { return out }
+  for (const entry of entries) {
+    const p = path.join(root, entry.name)
+    if (entry.isDirectory()) walkFiles(p, out)
+    else if (entry.isFile()) out.push(p)
+  }
+  return out
+}
+
+function resolveGlobPattern(cwd, projectRoot, pattern) {
+  if (typeof pattern !== 'string' || rejectPlaceholder(pattern) || /[{}[\]!]/.test(pattern)) return null
+  const resolved = path.isAbsolute(pattern) ? path.normalize(pattern) : path.resolve(projectRoot, pattern)
+  const normalized = normalizeSlash(resolved)
+  const magicAt = normalized.search(/[*?]/)
+  const prefix = magicAt < 0 ? normalized : normalized.slice(0, magicAt)
+  const anchor = path.resolve(prefix.endsWith('/') ? prefix : path.dirname(prefix))
+  if (!isUnderDir(anchor, projectRoot)) return null
+  return resolved
+}
+
+function fingerprintGlobFiles(cwd, projectRoot, patterns) {
+  const resolvedPatterns = []
+  const missingDependencies = []
+  const unsupportedDependencies = []
+  const absFiles = []
+  for (const pattern of [...new Set((patterns || []).filter(Boolean))]) {
+    const resolved = resolveGlobPattern(cwd, projectRoot, pattern)
+    if (!resolved) { unsupportedDependencies.push(String(pattern)); continue }
+    const normalized = normalizeSlash(resolved)
+    const magicAt = normalized.search(/[*?]/)
+    const prefix = magicAt < 0 ? normalized : normalized.slice(0, magicAt)
+    const root = path.resolve(prefix.endsWith('/') ? prefix : path.dirname(prefix))
+    if (!isDirectory(root)) { missingDependencies.push(String(pattern)); continue }
+    const re = globRegex(normalized)
+    const matches = walkFiles(root).filter(file => re.test(normalizeSlash(file)))
+    if (!matches.length) missingDependencies.push(String(pattern))
+    else absFiles.push(...matches)
+    resolvedPatterns.push(normalized)
+  }
+  const files = [...new Set(absFiles.map(p => storedPath(projectRoot, p)))].sort().map(p => fileEntry(projectRoot, p))
+  return {
+    kind: 'glob-files',
+    patterns: resolvedPatterns.sort(),
+    digest: digestEntries(files),
+    files,
+    complete: missingDependencies.length === 0 && unsupportedDependencies.length === 0,
+    missingDependencies: missingDependencies.sort(),
+    unsupportedDependencies: unsupportedDependencies.sort(),
+  }
+}
+
 function walkMarkdown(root, out = []) {
   let entries
   try {
@@ -162,7 +367,8 @@ function digestEntries(entries) {
 function fingerprintExactFiles(cwd, paths) {
   const uniq = [...new Set((paths || []).filter(Boolean).map(p => storedPath(cwd, p)).filter(Boolean))].sort()
   const files = uniq.map(p => fileEntry(cwd, p))
-  return { kind: 'exact-files', digest: digestEntries(files), files }
+  const missingDependencies = files.filter(e => e.missing).map(e => e.path)
+  return { kind: 'exact-files', digest: digestEntries(files), files, complete: missingDependencies.length === 0, missingDependencies, unsupportedDependencies: [] }
 }
 
 function fingerprintMarkdownTree(cwd, roots) {
@@ -186,7 +392,7 @@ function diffFingerprint(oldFp, newFp) {
 // UserPromptSubmit hook 只有 5 秒预算，不能对每个候选 state 重复全量 hash。
 function fingerprintMarkdownTreeCached(cwd, roots, cache) {
   if (!cache) return fingerprintMarkdownTree(cwd, roots)
-  const key = [...(roots || [])].sort().join('\n')
+  const key = `${path.resolve(cwd)}\0${[...(roots || [])].sort().join('\n')}`
   if (!cache.md.has(key)) cache.md.set(key, fingerprintMarkdownTree(cwd, roots))
   return cache.md.get(key)
 }
@@ -195,60 +401,76 @@ function fingerprintExactFilesCached(cwd, paths, cache) {
   if (!cache) return fingerprintExactFiles(cwd, paths)
   const uniq = [...new Set((paths || []).filter(Boolean).map(p => storedPath(cwd, p)).filter(Boolean))].sort()
   const files = uniq.map(p => {
-    if (!cache.file.has(p)) cache.file.set(p, fileEntry(cwd, p))
-    return cache.file.get(p)
+    const key = `${path.resolve(cwd)}\0${p}`
+    if (!cache.file.has(key)) cache.file.set(key, fileEntry(cwd, p))
+    return cache.file.get(key)
   })
-  return { kind: 'exact-files', digest: digestEntries(files), files }
+  const missingDependencies = files.filter(e => e.missing).map(e => e.path)
+  return { kind: 'exact-files', digest: digestEntries(files), files, complete: missingDependencies.length === 0, missingDependencies, unsupportedDependencies: [] }
 }
 
 function validateState(cwd, state, cache = null) {
-  if (state?.legacyUnverified) {
-    return { valid: false, sourceValid: false, codeValid: false, legacyUnverified: true, changedPaths: ['<legacy-unverified>'] }
+  if (state?.legacyUnverified || state?.schemaVersion !== STATE_SCHEMA_VERSION) {
+    return {
+      valid: false,
+      sourceValid: false,
+      codeValid: false,
+      dependencyComplete: false,
+      legacyUnverified: true,
+      changedPaths: [state?.legacyUnverified ? '<legacy-unverified>' : '<incompatible-schema>'],
+    }
   }
-  if (!state?.fingerprint) return { valid: false, sourceValid: false, codeValid: false, legacyUnverified: false, changedPaths: ['<missing-fingerprint>'] }
+  if (!state?.fingerprint) return { valid: false, sourceValid: false, codeValid: false, dependencyComplete: false, legacyUnverified: false, changedPaths: ['<missing-fingerprint>'] }
+  const projectRoot = resolveStoredPath(cwd, state.projectRoot || '.')
+  if (!isDirectory(projectRoot)) {
+    return { valid: false, sourceValid: false, codeValid: false, dependencyComplete: false, legacyUnverified: false, changedPaths: ['<invalid-project-root>'] }
+  }
   const oldSource = state.fingerprint.source
   const oldExtra = state.fingerprint.sourceExtra
+  const oldGlob = state.fingerprint.sourceGlob
   const oldCode = state.fingerprint.code
-  // kind='none'(非 OpenSpec 链无 markdown 来源):sourceValid 恒 false(trustCeiling=A),
-  // valid 恒 false,只可走 nativeResume 或 CheckpointValidate;code 侧照常比对供模板第四门判定。
+  const codeNow = fingerprintExactFilesCached(projectRoot, (oldCode?.files || []).map(e => e.path), cache)
+  const codeComplete = !oldCode || oldCode.complete === true
+  const codeValid = codeComplete && (!oldCode || oldCode.digest === codeNow.digest)
+  let extraValid = true
+  let extraChanged = []
+  if (oldExtra) {
+    const extraNow = fingerprintExactFilesCached(projectRoot, (oldExtra.files || []).map(e => e.path), cache)
+    extraValid = oldExtra.complete === true && oldExtra.digest === extraNow.digest
+    extraChanged = diffFingerprint(oldExtra, extraNow)
+  }
+  let globValid = true
+  let globChanged = []
+  if (oldGlob) {
+    const globNow = fingerprintGlobFiles(cwd, projectRoot, oldGlob.patterns || [])
+    globValid = oldGlob.complete === true && globNow.complete === true && oldGlob.digest === globNow.digest
+    globChanged = diffFingerprint(oldGlob, globNow)
+  }
+  const dependencyComplete = codeComplete && extraValid && globValid
   if (oldSource?.kind === 'none') {
-    const codeNow = fingerprintExactFilesCached(cwd, (oldCode?.files || []).map(e => e.path), cache)
-    const codeValid = !oldCode || (oldCode.files || []).length === 0 || oldCode.digest === codeNow.digest
     return {
       valid: false,
       sourceValid: false,
       codeValid,
+      dependencyComplete,
       legacyUnverified: false,
       sourceKind: 'none',
-      changedPaths: [...new Set(diffFingerprint(oldCode, codeNow))].sort(),
+      changedPaths: [...new Set([...diffFingerprint(oldCode, codeNow), ...extraChanged, ...globChanged])].sort(),
     }
   }
   const sourceNow = fingerprintMarkdownTreeCached(cwd, oldSource?.roots || [], cache)
-  const codeNow = fingerprintExactFilesCached(cwd, (oldCode?.files || []).map(e => e.path), cache)
-  // sourceExtra:changeDir 之外的自定义 proposal/design/tasks/plan 文档(v0.4.1+)。
-  // 旧 state 没有该字段时跳过,不因此判失效。
-  let extraValid = true
-  let extraChanged = []
-  if (oldExtra) {
-    const extraNow = fingerprintExactFilesCached(cwd, (oldExtra.files || []).map(e => e.path), cache)
-    extraValid = oldExtra.digest === extraNow.digest
-    extraChanged = diffFingerprint(oldExtra, extraNow)
-  }
-  // 空树 fail-closed(根因 RC1b):roots 非空但一个 markdown 都没收到(目录不存在/异常),
-  // digest 恒等于 sha256('') 空集碰撞,绝不能当「未变化」。
   const sourceEmpty = (oldSource?.roots || []).length > 0 && (oldSource?.files || []).length === 0
-  const sourceValid = !!oldSource && !sourceEmpty && oldSource.digest === sourceNow.digest && extraValid
-  // code 侧空集合按「无可验证项」视为未漂移(kind=none/planless state 需要 codeValid=true 才能走第四门),
-  // 但 files 非空时 digest 必须严格相等。
-  const codeValid = !oldCode || (oldCode.files || []).length === 0 || oldCode.digest === codeNow.digest
+  const sourceValid = !!oldSource && !sourceEmpty && oldSource.digest === sourceNow.digest && extraValid && globValid
   return {
-    valid: sourceValid && codeValid,
+    valid: sourceValid && codeValid && dependencyComplete,
     sourceValid,
     codeValid,
+    dependencyComplete,
     legacyUnverified: false,
     changedPaths: [...new Set([
       ...diffFingerprint(oldSource, sourceNow),
       ...extraChanged,
+      ...globChanged,
       ...diffFingerprint(oldCode, codeNow),
     ])].sort(),
   }
@@ -342,70 +564,157 @@ function inferCheckpoint(run, cwd) {
       ? `${storedPath(cwd, changeDir)}::${milestone}`
       : `nochg:${fnv1aHex(task)}::${milestone}`)
   const cacheVersion = Number(cp.cacheVersion || result.cacheVersion || (candidatePlan?.sourceMode?.startsWith?.('openspec') ? 1 : 0)) || 0
-  // cacheVersion<1 不再拒建(legacyStatePolicy=A):由 buildStateFromRun 强制 legacyUnverified=true,
-  // 绝不伪造 cacheVersion=1;模板侧 STATE_COMPATIBLE 对 legacyUnverified 放松(openspec-incremental.js)。
+  const projectRootInfo = inferProjectRoot(cwd, cp, result, runArgs, changeDir)
+  const specsGlob = firstString(cp.specsGlob, result.specsGlob, runArgs.specsGlob)
 
-  return { ok: true, result, runArgs, changeDir, milestone, task, checkpointKey, cacheVersion, planless: !candidatePlan }
+  return {
+    ok: true,
+    result,
+    runArgs,
+    changeDir,
+    milestone,
+    task,
+    checkpointKey,
+    cacheVersion,
+    projectRoot: projectRootInfo.path,
+    projectRootSource: projectRootInfo.source,
+    specsGlob,
+    planless: !candidatePlan,
+  }
 }
 
 function statePathForKey(cwd, checkpointKey) {
   return path.join(cwd, 'docs', 'ultracode', 'state', `${sha256(checkpointKey).slice(0, 24)}.json`)
 }
 
+function rawRevisionFromFile(file) {
+  const match = String(file || '').match(/\.r(\d+)\.json$/)
+  return match ? Number(match[1]) : 1
+}
+
+function terminalOutcome(runtimeStatus, resultStatus) {
+  if (['green', 'success', 'passed', 'pushed', 'completed'].includes(resultStatus)) return 'success'
+  if (['red', 'failed', 'commit-failed', 'needs-rework'].includes(resultStatus)) return 'failure'
+  if (CONTINUATION_STATUSES.has(resultStatus) || ['blocked', 'escalate', 'escalate-to-human'].includes(resultStatus)) return 'action-required'
+  if (['killed', 'cancelled'].includes(runtimeStatus)) return 'interrupted'
+  return 'unknown'
+}
+
+function runStartedAtMs(run) {
+  for (const value of [run?.startedAt, run?.startTime, run?.createdAt, run?.timestamp]) {
+    const parsed = typeof value === 'number' ? value : Date.parse(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+function compareStateFreshness(existing, candidate) {
+  if (!existing) return { accept: true }
+  if (candidate.legacyUnverified && existing.legacyUnverified === false) return { accept: false, reason: 'trusted-state-exists' }
+  if (existing.schemaVersion !== STATE_SCHEMA_VERSION && candidate.schemaVersion === STATE_SCHEMA_VERSION && !candidate.legacyUnverified) return { accept: true }
+  if (existing.sourceRunId && existing.sourceRunId === candidate.sourceRunId) {
+    const oldRevision = Number(existing.sourceRunRevision || 1)
+    const newRevision = Number(candidate.sourceRunRevision || 1)
+    if (newRevision < oldRevision) return { accept: false, reason: 'stale-state-update' }
+    if (newRevision === oldRevision) {
+      if (existing.sourceResultDigest === candidate.sourceResultDigest) return { accept: false, reason: 'state-unchanged', unchanged: true }
+      return { accept: false, reason: 'ambiguous-state-freshness' }
+    }
+    return { accept: true, preserveResumeArgs: true }
+  }
+  const oldStarted = Number(existing.sourceStartedAtMs)
+  const newStarted = Number(candidate.sourceStartedAtMs)
+  if (!Number.isFinite(oldStarted) || !Number.isFinite(newStarted) || oldStarted === newStarted) {
+    return { accept: false, reason: 'ambiguous-state-freshness' }
+  }
+  return newStarted > oldStarted ? { accept: true } : { accept: false, reason: 'stale-state-update' }
+}
+
+function writeStateFresh(statePath, candidate) {
+  const lockPath = `${statePath}.lock`
+  const fd = acquireStateLock(lockPath)
+  if (fd == null) return { skipped: 'state-write-contended' }
+  try {
+    const existing = readJson(statePath)
+    const freshness = compareStateFreshness(existing, candidate)
+    if (!freshness.accept) {
+      if (freshness.unchanged) return { statePath, state: existing, unchanged: true }
+      return { skipped: freshness.reason }
+    }
+    if (freshness.preserveResumeArgs && existing?.resumeArgs) candidate.resumeArgs = existing.resumeArgs
+    candidate.stateRevision = Number(existing?.stateRevision || 0) + 1
+    if (!writeJsonAtomic(statePath, candidate)) return { skipped: 'write-failed' }
+    return { statePath, state: candidate }
+  } catch {
+    return { skipped: 'write-failed' }
+  } finally {
+    releaseStateLock(lockPath, fd)
+  }
+}
+
 // 返回 { statePath, state } | { skipped: reason } —— 不再静默 null,
 // 调用方(harvest/backfill)负责把 reason 落成 warn 行(失败可观测)。
-function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = false }) {
+function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = false, rawRevision = 1, resultDigest = null }) {
   try {
     const inferred = inferCheckpoint(run, cwd)
     if (!inferred.ok) return { skipped: inferred.reason }
-    const { result, runArgs, changeDir, milestone, task, checkpointKey, cacheVersion } = inferred
+    const {
+      result, runArgs, changeDir, milestone, task, checkpointKey, cacheVersion,
+      projectRoot, projectRootSource, specsGlob,
+    } = inferred
     const specSyncDone = result.specSync?.done === true
-    const rawBasePlan = result.basePlan || (result.at === 'DecisionApply' ? result.plan : null) || result.plan || null
-    const rawEffectivePlan = result.effectivePlan || result.plan || rawBasePlan
-    // :280 门删除:planless run(result 无 plan,如 recon_summary+implement+verify+finalize 形态)
-    // 也建档,basePlan/effectivePlan 置 null —— 服务于 native-resume(resumeArgs)与取证可见。
+    const hasExplicitBase = Object.prototype.hasOwnProperty.call(result, 'basePlan')
+    const hasExplicitEffective = Object.prototype.hasOwnProperty.call(result, 'effectivePlan')
+    const legacyPlanFallback = result.basePlan || (result.at === 'DecisionApply' ? result.plan : null) || result.plan || null
+    const rawBasePlan = hasExplicitBase ? result.basePlan : (cacheVersion >= 2 ? (result.at === 'DecisionApply' ? result.plan : null) : legacyPlanFallback)
+    const rawEffectivePlan = hasExplicitEffective ? result.effectivePlan : (cacheVersion >= 2 ? rawBasePlan : (result.effectivePlan || result.plan || rawBasePlan))
+    const candidatePlan = result.effectivePlan || result.basePlan || result.plan || null
+    if (cacheVersion >= 2 && candidatePlan && !hasExplicitBase) return { skipped: 'missing-base-plan' }
 
     const basePlan = rawBasePlan ? sanitizePlan(rawBasePlan, specSyncDone) : null
     const effectivePlan = rawEffectivePlan ? sanitizePlan(rawEffectivePlan, specSyncDone) : null
-    // changeDir=null(非 OpenSpec 链):source 显式 kind='none',validateState 对其恒 sourceValid=false,
-    // 永不进 TRUSTED(trustCeiling=A);digest=null 杜绝 sha256('') 空集碰撞假 valid(根因 RC1b)。
     const source = changeDir
       ? fingerprintMarkdownTree(cwd, [changeDir])
       : { kind: 'none', roots: [], digest: null, files: [] }
-    // 项目自定义 proposal/design/tasks/plan 文档可能位于 changeDir 之外(args.*Doc 显式覆盖);
-    // 它们同样是 Plan 的证据基础,必须进入 fingerprint,否则改了也不会失效。
-    const changeDirAbs = changeDir ? resolveProjectPath(cwd, changeDir) : null
-    const extraSourceDocs = changeDirAbs ? [...new Set(
-      [runArgs.proposalDoc, runArgs.designDoc, runArgs.tasksDoc, runArgs.planDoc]
-        .filter(p => typeof p === 'string' && p && !rejectPlaceholder(p))
-        .map(p => resolveProjectPath(cwd, p))
-        .filter(abs => abs && !isUnderDir(abs, changeDirAbs))
-    )] : []
-    const sourceExtra = extraSourceDocs.length ? fingerprintExactFiles(cwd, extraSourceDocs) : null
-    const code = fingerprintExactFiles(cwd, collectPlanCodePaths(rawBasePlan, rawEffectivePlan))
-    // resume 的 args 是全量替换不是合并:必须保存首轮完整 args,否则 native resume 时
-    // 脚本回退 <占位> 默认值 → prompt/route/model 变化 → Plan 及以后粘滞 miss。
-    // priorState/checkpointValidation 是恢复通道自身的载体,递归保存会让 state 逐代膨胀。
+    const sourceDocs = [runArgs.proposalDoc, runArgs.designDoc, runArgs.tasksDoc, runArgs.planDoc]
+      .filter(p => typeof p === 'string' && p && !rejectPlaceholder(p))
+    const sourceExtra = sourceDocs.length ? fingerprintPlanDependencies(cwd, projectRoot, sourceDocs) : null
+    const sourceGlob = specsGlob ? fingerprintGlobFiles(cwd, projectRoot, [specsGlob]) : null
+    const code = fingerprintPlanDependencies(cwd, projectRoot, collectPlanCodePaths(rawBasePlan, rawEffectivePlan))
+
     const resumeArgs = cloneJson(runArgs) || {}
     delete resumeArgs.priorState
     delete resumeArgs.checkpointValidation
-    // 实现已执行但 Verify 未绿(失败/escalate/中途 Stop):fingerprint 对着 partial workspace
-    // 计算,而 Reviewer 从未审过这份代码。标 dirty,禁止直接 Plan/Review ARTIFACT HIT。
+
+    const resultStatus = result.status || null
+    const runtimeStatus = run.status || null
+    const outcome = terminalOutcome(runtimeStatus, resultStatus)
+    const decisionApply = cloneJson(result.decisionApply) || { decisions: cloneJson(runArgs.decisions) || {} }
+    if (!decisionApply.decisions) decisionApply.decisions = cloneJson(runArgs.decisions) || {}
+    const continuationArgs = CONTINUATION_STATUSES.has(resultStatus) ? (cloneJson(result.nextArgs) || {}) : {}
+    if (resultStatus === 'need-decision') {
+      continuationArgs.decisions = {
+        ...(cloneJson(runArgs.decisions) || {}),
+        ...(cloneJson(decisionApply.decisions) || {}),
+        ...(cloneJson(continuationArgs.decisions) || {}),
+      }
+    }
+    const sourceResultDigest = resultDigest || sha256(stableStringify(result))
+    const pendingTransition = CONTINUATION_STATUSES.has(resultStatus)
+      ? { status: resultStatus, at: result.at || null, runId: run.runId || null, runRevision: Number(rawRevision || 1), resultDigest: sourceResultDigest }
+      : null
+
     const reachedImplementation = !!(result.impl || result.verify || result.audit || result.commitResult
       || ['Implement', 'Verify', 'Audit', 'Commit'].includes(result.at))
-    const dirtyWorktree = reachedImplementation && result.verify?.status !== 'green'
-    // live 通道内部强制(latestFeedback):调用方无需预知 cacheVersion ——
-    // cacheVersion<1 的建档一律 legacy,绝不冒充可信档;与 backfill 的 legacyUnverified:true 对齐。
-    const legacy = legacyUnverified || cacheVersion < 1
+    const auditRejected = result.audit && result.audit.verdict !== 'accept'
+    const commitFailed = resultStatus === 'commit-failed' || (result.commitResult && result.commitResult.committed === false)
+    const explicitDirty = result.dirtyWorktree === true || ['red', 'needs-rework', 'escalate-to-human', 'failed', 'escalate'].includes(resultStatus)
+    const dirtyWorktree = explicitDirty || auditRejected || commitFailed || (reachedImplementation && result.verify?.status !== 'green')
+    const legacy = legacyUnverified || cacheVersion < 2
+    const reviewReusable = !legacy && !dirtyWorktree && result.review?.verdict === 'approve'
+    const reviewInputCanonical = typeof result.reviewInputCanonical === 'string' ? result.reviewInputCanonical : null
 
     const statePath = statePathForKey(cwd, checkpointKey)
-    // 防降级双向守卫:已有可信档(legacyUnverified=false)不得被 legacy 档覆盖;
-    // 与 backfillStates 的「existing 非 legacy → continue」对齐(live 通道同规则)。
-    if (legacy) {
-      const existing = readJson(statePath)
-      if (existing && existing.legacyUnverified === false) return { skipped: 'trusted-state-exists' }
-    }
-
     const state = {
       schemaVersion: STATE_SCHEMA_VERSION,
       cacheVersion,
@@ -413,36 +722,56 @@ function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = fals
       templateKind: firstString(result.checkpoint?.kind, result.templateKind) || null,
       checkpointKey,
       updatedAt: run.timestamp || new Date().toISOString(),
+      sourceRunId: run.runId || null,
+      sourceRunRevision: Number(rawRevision || 1),
+      sourceStartedAtMs: runStartedAtMs(run),
+      sourceResultDigest,
       runId: run.runId || null,
       sessionId: sessionId || run.sessionId || run.session_id || null,
       workflowName: run.workflowName || null,
-      workflowStatus: run.status || result.status || null,
+      runtimeStatus,
+      resultStatus,
+      terminalOutcome: outcome,
+      workflowStatus: resultStatus || runtimeStatus,
       scriptPath: run.scriptPath || null,
       scriptSha1: run.script ? sha1(run.script) : null,
       task,
+      workspaceRoot: '.',
+      projectRoot: storedPath(cwd, projectRoot),
+      projectRootSource,
       changeDir: changeDir ? storedPath(cwd, changeDir) : null,
       milestone,
       resumeArgs,
+      continuationArgs,
+      pendingTransition,
       dirtyWorktree,
-      reviewReusable: !dirtyWorktree,
+      reviewReusable,
       recon: cloneJson(result.recon),
       basePlan,
       effectivePlan,
+      effectivePlanDigest: effectivePlan ? sha256(stableStringify(effectivePlan)) : null,
+      reviewInputCanonical,
+      reviewInputDigest: reviewInputCanonical ? sha256(reviewInputCanonical) : null,
       review: cloneJson(result.review),
-      decisionApply: cloneJson(result.decisionApply) || { decisions: {} },
-      // need-decision 双通道(needDecisionChannel=A):新 decisionPoints 优先,旧字符串 questions 兼容。
+      decisionApply,
       decisionPoints: cloneJson(result.decisionPoints) ?? null,
       questions: cloneJson(result.openQuestionsForUser ?? result.questions) ?? null,
       routing: cloneJson(result.routing),
+      artifactCache: cloneJson(result.artifactCache),
       patchRounds: result.patchRounds ?? 0,
       specSyncDone,
       legacyUnverified: legacy,
-      appliedOpenSpecEdits: specSyncDone ? cloneJson(rawEffectivePlan?.openspecEdits || []) : [],
-      fingerprint: { source, sourceExtra, code },
+      appliedOpenSpecEdits: specSyncDone ? cloneJson(result.appliedOpenSpecEdits || rawEffectivePlan?.openspecEdits || []) : [],
+      fingerprint: {
+        source,
+        sourceExtra,
+        sourceGlob,
+        code,
+        complete: code.complete === true && (!sourceExtra || sourceExtra.complete === true) && (!sourceGlob || sourceGlob.complete === true),
+      },
     }
 
-    if (!writeJson(statePath, state)) return { skipped: 'write-failed' }
-    return { statePath, state }
+    return writeStateFresh(statePath, state)
   } catch {
     return { skipped: 'build-exception' }
   }
@@ -478,8 +807,8 @@ function backfillStates(cwd) {
   try {
     files = fs.readdirSync(rawDir)
       .filter(f => /^wf_.*\.json$/.test(f))
-      .map(f => ({ f, mtime: fs.statSync(path.join(rawDir, f)).mtimeMs }))
-      .sort((a, b) => a.mtime - b.mtime)
+      .map(f => ({ f, revision: rawRevisionFromFile(f), mtime: fs.statSync(path.join(rawDir, f)).mtimeMs }))
+      .sort((a, b) => a.revision - b.revision || a.mtime - b.mtime)
       .slice(-MAX_BACKFILL_RAW)
   } catch {
     return 0
@@ -490,7 +819,7 @@ function backfillStates(cwd) {
   for (const x of files) {
     const runId = x.f.replace(/\.json$/, '').replace(/\.r\d+$/, '')
     const prev = latestByRun.get(runId)
-    if (!prev || x.mtime >= prev.mtime) latestByRun.set(runId, { ...x, runId })
+    if (!prev || x.revision > prev.revision || (x.revision === prev.revision && x.mtime >= prev.mtime)) latestByRun.set(runId, { ...x, runId })
   }
   let built = 0
   for (const x of latestByRun.values()) {
@@ -511,7 +840,7 @@ function backfillStates(cwd) {
     const sessionId = findSessionForRun(cwd, runId)
     // 旧 raw 没有生成当时的 fingerprint,绝不能用今天计算的 hash 冒充历史基线。
     // 这类 state 只可用于 native resume;否则必须先走廉价 CheckpointValidate。
-    if (buildStateFromRun({ run, cwd, sessionId, legacyUnverified: true }).state) built++
+    if (buildStateFromRun({ run, cwd, sessionId, legacyUnverified: true, rawRevision: x.revision }).state) built++
   }
   return built
 }
@@ -569,7 +898,7 @@ function nativeResumeCheck(cwd, sessionId, state) {
 const DIRTY_STATUSES = new Set(['red', 'needs-rework', 'commit-failed', 'escalate-to-human', 'unknown', 'failed', 'escalate'])
 function stateDirtyWorktree(state) {
   if (state?.dirtyWorktree != null) return state.dirtyWorktree === true
-  return DIRTY_STATUSES.has(state?.workflowStatus)
+  return DIRTY_STATUSES.has(state?.resultStatus || state?.workflowStatus)
 }
 
 function resolveCheckpointCandidates({ cwd, sessionId = null, requirement = '', limit = 3 }) {
@@ -591,7 +920,7 @@ function resolveCheckpointCandidates({ cwd, sessionId = null, requirement = '', 
   for (const x of files) {
     const p = path.join(stateDir, x.f)
     const state = readJson(p)
-    if (!state || state.kind !== 'ultracode-semantic-state' || state.schemaVersion !== STATE_SCHEMA_VERSION) continue
+    if (!state || state.kind !== 'ultracode-semantic-state' || ![1, STATE_SCHEMA_VERSION].includes(state.schemaVersion)) continue
     scored.push({ p, state, mtime: x.mtime, score: tokenScore(requirement, state) })
   }
   scored.sort((a, b) => b.score - a.score || b.mtime - a.mtime)
@@ -599,25 +928,35 @@ function resolveCheckpointCandidates({ cwd, sessionId = null, requirement = '', 
   const cache = { md: new Map(), file: new Map() }
   return scored.slice(0, Math.max(1, Math.min(limit, 5))).map(({ p, state, mtime, score }) => {
     const dirty = stateDirtyWorktree(state)
+    const contractCompatible = state.schemaVersion === STATE_SCHEMA_VERSION && state.cacheVersion === 2
+    const validation = validateState(cwd, state, cache)
     return {
       path: storedPath(cwd, p),
       checkpointKey: state.checkpointKey,
       changeDir: state.changeDir,
       milestone: state.milestone,
       task: state.task,
-      status: state.workflowStatus,
+      status: state.resultStatus || state.workflowStatus,
+      runtimeStatus: state.runtimeStatus || null,
+      resultStatus: state.resultStatus || null,
+      terminalOutcome: state.terminalOutcome || null,
       runId: state.runId,
       scriptPath: state.scriptPath,
       scriptSha1: state.scriptSha1,
       sessionId: state.sessionId,
+      schemaVersion: state.schemaVersion,
       cacheVersion: state.cacheVersion,
-      legacyUnverified: !!state.legacyUnverified,
-      // sourceKind 直接暴露在候选行:主 agent 不必逐候选 Read state JSON
-      // 就能区分「普通 valid=false 禁复用」与「kind=none 预期内」。
+      templateKind: state.templateKind || null,
+      contractCompatible,
+      incompatibility: contractCompatible ? null : (state.schemaVersion !== STATE_SCHEMA_VERSION ? 'schema-version' : 'cache-version'),
+      legacyUnverified: !!state.legacyUnverified || !contractCompatible,
       sourceKind: state.fingerprint?.source?.kind ?? 'none',
+      dependencyComplete: validation.dependencyComplete ?? false,
       dirtyWorktree: dirty,
-      reviewReusable: !dirty,
-      validation: validateState(cwd, state, cache),
+      reviewReusable: state.reviewReusable === true && !dirty,
+      continuationArgs: state.pendingTransition ? (cloneJson(state.continuationArgs) || {}) : {},
+      pendingTransition: cloneJson(state.pendingTransition),
+      validation,
       nativeResumeEligible: nativeResumeCheck(cwd, sessionId, state),
       score,
       mtime,
@@ -636,4 +975,7 @@ module.exports = {
   // inferCheckpoint 未导出时「live 强制 legacy」与「LDL_UGC backfill 干跑」均不可实现)。
   inferCheckpoint,
   fnv1aHex,
+  rawRevisionFromFile,
+  stableStringify,
+  terminalOutcome,
 }

@@ -90,7 +90,7 @@ async function askAdvisor(question, context) {
 - teammate 是我 spawn 的下属，`name@team` 寻址，**层级**关系
 - peer session 是用户自己开的另一个 Claude Code，独立进程与权限域，**对等**关系
 
-需求 8 描述的"同项目多个会话互相提醒"明确是后者。已实测 `ListAgents` 在**无 agent-teams** 的情况下正常工作：
+需求 8 描述的“同项目多个会话互相提醒”明确是后者。已实测 `ListAgents` 在**无 agent-teams** 的情况下正常工作，但当前策略只允许在当前用户原始需求显式要求 handoff 时，由 workflow terminal 后的外层会话定向调用 `ListAgents` / `SendMessage`；默认插件不注册 `SessionStart` 汇总，`.claude/progress/*.jsonl` 仅作为持久 checkpoint：
 
 ```
 Peer sessions (2):

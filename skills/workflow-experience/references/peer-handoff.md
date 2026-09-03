@@ -12,23 +12,22 @@
 - “开发完成后提醒其他正在并行开发的会话”
 
 普通多会话并行开发、普通 workflow 完成、普通进度记录 **不自动启用 SendMessage**。
-常态同步仍走 `.claude/progress/*.jsonl` + `peer-progress` hook。
+即时 handoff 的唯一触发源是当前用户的原始需求；不得从历史 checkpoint、上一轮 handoff、并行会话存在或 agent 摘要推断启用。
+常态进度仍由 `harvest-workflow` 写入 `.claude/progress/*.jsonl`，但它只作为持久 checkpoint。默认安装不注册 `peer-progress`，不自动读取或注入其他会话进度；`peer-progress.cjs` 仅作为历史/手动工具保留。
 
-## 为什么不能直接写进 workflow DSL
+## 双层能力边界
 
-Ultracode workflow 沙箱没有 `SendMessage` / `ListAgents` primitive。
-workflow 内可用的是 `agent`、`parallel`、`pipeline`、`workflow`、`phase`、`log`、`args`、`budget` 等。
-因此不要在模板里伪造 `await SendMessage(...)`。
+顶层 Ultracode Workflow DSL 没有 `SendMessage` / `ListAgents` primitive，不能在脚本中伪造 `await SendMessage(...)`。但 `agent()` 启动的 LLM 子代理可能从其自身工具面获得这两个工具，所以“不要发消息”的 prompt 不是隔离边界。
+
+所有成品模板和新写 workflow 必须让**每一次** LLM agent 调用经过统一 wrapper。wrapper 只做一件事：在调用点的 `opts.disallowedTools` 中合并 `SendMessage` 与 `ListAgents`；必须保留原有禁用项（例如 Advisor 的 `Edit` / `Write`），并原样透传 prompt、schema、model、effort、phase、label、isolation 等其他 opts。不得绕过 wrapper 直接调用 `agent()`。
 
 正确分层：
 
-1. **workflow 内**：正常执行 Recon / Plan / Implement / Verify / Commit，并返回已有的 `broadcast` 以及结构化结果。
-2. **外层 Claude Code 会话**：workflow 到达 terminal result 后，根据用户的显式 peer-handoff 意图调用 `ListAgents`
-   解析目标，再用 `SendMessage` 定向发送。
-3. **持久化兜底**：无论即时消息是否成功，`harvest-workflow` 仍把运行结果与
-   `.claude/progress/<sessionId>.jsonl` 留作 checkpoint。
+1. **workflow 子代理**：在硬隔离下执行 Recon / Plan / Implement / Verify / Commit；只返回已有 `broadcast` 与结构化结果。
+2. **外层 Claude Code 主会话**：workflow 到达 terminal result 后，且当前用户原始需求明确要求 handoff，才调用 `ListAgents` 解析目标并用 `SendMessage` 定向发送。
+3. **持久化兜底**：无论即时消息是否成功，`harvest-workflow` 仍保留运行结果与 `.claude/progress/<sessionId>.jsonl` checkpoint。
 
-这样不会新增一个 LLM phase，也不会破坏 OpenSpec-first 的缓存键。
+这样既阻止子代理主动增量上报，也不新增 LLM phase、不破坏 OpenSpec-first 缓存键。
 
 ## Authoring 规则
 

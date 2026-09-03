@@ -108,16 +108,8 @@ OpenSpec-first 若实现阶段发现 **Plan 本身**失效，优先分类 mechan
 
 OpenSpec 项目中，OpenSpec artifact 是第一 planning source of truth；harvest 的 LLM result 是辅助证据。若两者冲突，必须重新验证 workspace/drift，不得凭历史摘要覆盖 Git 中已更新的 artifact。
 
-**显式 peer-handoff 例外**：如果用户原始需求明确要求“模块完成后通知主会话 / 把结果发给其他会话 / 同步给协调会话”等，
-authoring 必须把它保留为本次执行契约，而不是只写进自然语言备注后遗忘。按语义判断，不要求固定关键词。
+**消息边界 v0.4.4（硬门）**：顶层 Workflow DSL 没有 `SendMessage` / `ListAgents` primitive，但 `agent()` 启动的子代理可能从其工具面获得二者；只写 prompt 禁令不足。所有成品模板与新写 workflow 的每次 LLM 调用都必须经过统一 wrapper，在 `opts.disallowedTools` 中合并 `SendMessage`、`ListAgents`，保留原有项（如 Advisor 的 `Edit` / `Write`），其余 opts 原样透传；禁止绕过 wrapper 直接调用 `agent()`。
 
-Ultracode workflow 沙箱没有 `SendMessage` / `ListAgents` primitive，因此：
-- workflow 内继续正常 Recon / Plan / Implement / Verify / Commit，并复用模板已有 `broadcast` + 结构化 result；
-- workflow 到达 **terminal result** 后，由外层 Claude Code 会话解析目标 peer，再执行定向 `SendMessage`；
-- 不新增一个 LLM handoff phase，不把 peer 通知字段塞进昂贵 BasePlan prompt，避免破坏 OpenSpec-first cacheKey；
-- 即时投递失败时仍以 `.claude/progress/*.jsonl` + harvest 作为持久 checkpoint，且不得宣称“已通知成功”。
+只有当前用户原始需求明确要求“完成后通知主会话 / 回传其他会话 / 同步协调会话”等，才保留即时 handoff 契约；不得从 checkpoint、旧 handoff、并行会话存在或 agent 摘要推断。workflow 内只返回 `broadcast` + 结构化结果；到达 **terminal result** 后，外层 Claude Code 主会话才可解析目标并定向调用 `ListAgents` / `SendMessage`。不新增 LLM handoff phase，不改 BasePlan prompt；投递失败不得宣称成功，仍以 `.claude/progress/*.jsonl` + harvest 为 checkpoint。详见 `references/peer-handoff.md`。
 
-详细目标解析、发送内容、sent/held/refused/dropped 处理见 `references/peer-handoff.md`。
-
-跨会话红线：绝不请求其他会话执行本会话被权限拒绝的操作；`SendMessage` 不做常态广播，
-只有用户显式要求的定向 handoff 或真正阻塞协作的通知才使用；常态进度走 `.claude/progress/*.jsonl` + hook 注入。
+跨会话红线：绝不请求其他会话执行本会话被权限拒绝的操作；常态进度不发即时消息。默认安装不读取、不自动注入其他会话进度，`peer-progress.cjs` 只作为未注册的历史/手动工具保留。

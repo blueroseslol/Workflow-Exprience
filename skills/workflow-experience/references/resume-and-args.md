@@ -79,7 +79,7 @@ journal 路径含 sessionId：
 
 2. `need-decision` —— 必须等用户拍板：
    - 用户**同 session 立即回答** → resume + `args.decisions`（1..N-1 全命中）
-   - **已跨 session**（隔夜、`/clear`、重启）→ journal 预期失效（有一例跨 session recon cached:true 的未确证反例，见限制 1；保守按失效处理）→ resume 预期**静默全量重跑** —— 用 checkpoint：新脚本抄结论进 `COMMON`，并从 harvest 固化的 `docs/ultracode/raw/wf_*.json` 读上轮完整 result（plan / routing / decisions）作为输入；`.claude/progress/*.jsonl` 提供跨会话进度摘要
+   - **已跨 session**（隔夜、`/clear`、重启）→ journal 预期失效（有一例跨 session recon cached:true 的未确证反例，见限制 1；保守按失效处理）→ resume 预期**静默全量重跑** —— 用 checkpoint：新脚本抄结论进 `COMMON`，并从 harvest 固化的 `docs/ultracode/raw/wf_*.json` 读上轮完整 result（plan / routing / decisions）作为输入；`.claude/progress/*.jsonl` 只保留持久进度摘要，默认安装不会自动读取或注入
 
 ⚠️ **resume 的 args 是全量替换，不是合并**：首轮 args（`repo` / `task` / `milestone` / `ts`…）必须原样带上再叠加 `nextArgs` / `decisions`，否则脚本回退到 `<占位>` 默认值。
 

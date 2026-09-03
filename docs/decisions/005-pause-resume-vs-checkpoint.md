@@ -28,7 +28,7 @@ ADR-003 为「等用户拍板」场景选了 B（一个决议一个 workflow，�
 
 - **自动可处理的早退**（`route-escalation-required` / `replan-required`）→ resume 是**主路径**。
 - **等用户拍板的早退**（`need-decision`）→ 用户同 session 立即回答用 resume；隔夜 / `/clear` / 重启后用 checkpoint（ADR-003 的 B 不变，此时它是唯一路径而非"首选"）。
-- Checkpoint 的数据源：`harvest-workflow` 固化的 `docs/ultracode/raw/wf_*.json`（完整 result，含 plan / routing / decisions）+ `.claude/progress/*.jsonl`（跨会话进度摘要）。
+- Checkpoint 的数据源：`harvest-workflow` 固化的 `docs/ultracode/raw/wf_*.json`（完整 result，含 plan / routing / decisions）+ `.claude/progress/*.jsonl`（持久进度摘要；默认安装不自动读取或注入）。
 
 ## 关键机制说明
 

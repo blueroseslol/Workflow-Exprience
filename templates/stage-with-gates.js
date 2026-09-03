@@ -22,6 +22,13 @@ export const meta = {
   ],
 }
 
+function llmAgent(prompt, opts = {}) {
+  return agent(prompt, {
+    ...opts,
+    disallowedTools: [...new Set([...(opts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
+  })
+}
+
 // ---------- COMMON：上一轮的拍板结论抄到这里 ----------
 const COMMON = {
   repo: '<D:/path/to/repo>',
@@ -112,7 +119,7 @@ const VERIFY_SCHEMA = {
 
 // ---------- Plan ----------
 phase('Plan')
-const plan = await agent(
+const plan = await llmAgent(
   [
     `你是 ${COMMON.milestone} 的规划者。只规划，不改代码。`,
     '',
@@ -159,7 +166,7 @@ const planDigest = [
 
 // ---------- Review ----------
 phase('Review')
-const review = await agent(
+const review = await llmAgent(
   `你是 advisor，只审计划。找出它会失败的地方，不要附和。\n\n${planDigest}\n\n` +
     `已拍板事项（不得推翻）：${COMMON.decided.join('；')}\n\n` +
     'block 条件：根因无 file:line / 越过 mustNotTouch / 试图勾选 tickAllowed 之外的条目 / 把未验证假设当事实。',
@@ -186,7 +193,7 @@ if (review?.verdict === 'block') {
 
 // ---------- Implement ----------
 phase('Implement')
-const impl = await agent(
+const impl = await llmAgent(
   [
     '你是实现层。按计划逐切片实现。',
     '',
@@ -217,7 +224,7 @@ const impl = await agent(
 
 // ---------- Verify ----------
 phase('Verify')
-const verify = await agent(
+const verify = await llmAgent(
   [
     '你是独立验证 + 提交层。不要相信上一层的自述，自己跑一遍。',
     `测试命令：${plan.testCommands.join(' && ')}`,

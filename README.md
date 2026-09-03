@@ -1,6 +1,6 @@
 # Workflow-Experience
 
-Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行记录固化、跨会话进度提醒。
+Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行记录固化、显式跨会话定向回传。
 
 以 **Claude Code plugin** 形式提供（而非裸 skill），因为需求中的三个 hook 必须常驻。
 
@@ -90,12 +90,12 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 │   └── readonly-recon.js      只读调研
 ├── commands/
 │   └── workflow.md            /workflow-experience:workflow 命令入口
-├── hooks/                   四个 hook，全部实测通过
+├── hooks/                   三个默认注册 hook，全部实测通过
 │   ├── hooks.json
 │   ├── checkpoint-lib.cjs     语义 checkpoint：建档/验证/resolver/backfill（v0.4.3 legacy+kind=none）
 │   ├── harvest-workflow.cjs   Stop：固化 run + 写进度（v0.4.3 指纹续收 + raw .rN 版本化）
 │   ├── skill-pointer.cjs      PreToolUse(Skill)：注入一行路径指针
-│   ├── peer-progress.cjs      SessionStart：注入其他会话的新进度
+│   ├── peer-progress.cjs      历史/手动读取工具（保留文件，默认不注册、不自动注入）
 │   └── workflow-intake.cjs    UserPromptSubmit：workflow 前缀 → 意图路由 + checkpoint resolver
 ├── tools/
 │   ├── scan-corpus.mjs      人工触发的语料分析（替代被砍掉的自动闭环）
@@ -106,17 +106,21 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 
 ---
 
-## 四个 hook 做什么
+## 三个默认注册 hook 做什么
 
 | Hook | 事件 | 行为 |
 |---|---|---|
 | `harvest-workflow` | `Stop` | 轮询 `wf_*.json` 终态 → 复制到 `<项目>/docs/ultracode/raw/` + 追加 `index.jsonl` + 写 `.claude/progress/<sessionId>.jsonl` |
 | `skill-pointer` | `PreToolUse(Skill)` | 命中 `workflow-authoring` 时注入 ~30 token 的路径指针 |
-| `peer-progress` | `SessionStart(startup\|clear)` | 汇总同项目其他会话的新进度，硬性截断 10 行 / 1500 字符 |
 | `workflow-intake` | `UserPromptSubmit` | 在消息首个非空白字符处匹配 `workflow ` / `/workflow ` 前缀 → 注入意图路由指令（兼容旧前缀 `workflow-experience `；正文、代码块/引用内提及不触发） |
 
+`peer-progress.cjs` 仍保留为历史兼容/手动排障工具，但 `hooks/hooks.json` 不再注册 `SessionStart(startup|clear)`。因此默认安装只持续写入 `.claude/progress/*.jsonl` 作为 checkpoint，绝不自动读取或向新会话注入其他会话进度。
 
-四个 hook 的共同纪律：
+**v0.4.4 消息边界**：顶层 Workflow DSL 没有 peer primitive，但 LLM 子代理可能拥有 `ListAgents` / `SendMessage`。五个 `templates/*.js` 成品模板及仍可执行的 `legacy/codex-relay.workflow.js` 统一让每次 agent 调用经过 wrapper，在保留调用点原有 `disallowedTools` 的同时硬禁这两个工具；不依赖 prompt 自律。
+
+只有当前用户的原始需求显式要求 handoff 时，workflow 才把它保留为执行契约；workflow 返回 terminal result 后，外层 Claude Code 主会话才可定向执行 `ListAgents` / `SendMessage`。普通并行开发、历史 checkpoint 或其他会话的存在都不得触发即时消息。
+
+三个默认注册 hook 的共同纪律：
 - 任何异常都静默 `exit 0`，绝不阻断会话
 - `harvest` 第一件事查 `stop_hook_active`，防递归
 - 跨轮次游标存 `os.tmpdir()`，因为 workflow 是后台任务，Stop 触发时文件可能还没落盘

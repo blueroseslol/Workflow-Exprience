@@ -4,7 +4,7 @@
 
 ---
 
-## 1. hook 游标会掩盖失败 `[通用]`
+## 1. hook / 历史手动工具游标会掩盖失败 `[通用]`
 
 **症状**：hook 第一次跑"成功"了（游标记为已处理），但产物写到了错误的位置。之后每次跑都被游标跳过，看起来像"什么都没发生"。
 
@@ -12,7 +12,7 @@
 
 **教训**：调试 hook 时**先清游标**再重跑，否则你在调试一个不会执行的分支。
 ```bash
-ls "$TMPDIR"/wfharvest-*.json "$TMPDIR"/wfpeer-*.json
+ls "$TMPDIR"/wfharvest-*.json "$TMPDIR"/wfpeer-*.json  # wfpeer 仅在手动运行历史 peer-progress 工具时存在
 rm -f "$TMPDIR"/wfharvest-<hash>.json
 ```
 

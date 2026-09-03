@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 /**
- * peer-progress.cjs — SessionStart hook（matcher: startup|clear）
+ * peer-progress.cjs — 历史/手动工具（默认插件 hooks 不注册）
  *
- * 需求 8（读取侧）：会话启动时，把同项目其他会话的新进度注入上下文。
+ * 读取 .claude/progress/*.jsonl，并按旧 SessionStart hook 协议输出其他会话的新进度。
+ * 本文件仅为历史兼容与人工排障保留；hooks/hooks.json 不再注册它，默认安装绝不自动
+ * 读取或注入其他会话进度。若操作者明确决定手动注册，建议仍限制 matcher 为 startup|clear。
  *
- * 为什么挂 SessionStart 而不是 UserPromptSubmit：
+ * 为什么过去挂 SessionStart 而不是 UserPromptSubmit：
  *   UserPromptSubmit 每轮都发 = 每轮都贵，且注入内容计入每轮上下文，
  *   随项目推进单调变贵。SessionStart 只在开局注入一次。
  *
  * 为什么不用 SendMessage 做常态广播：
  *   投递有 held / refused / dropped 三态，held 取决于对方的 permissionMode，
  *   而该字段不在 sessions/<pid>.json 里 —— 发送前静态不可判，dropped 是永久丢弃。
- *   SendMessage 保留给「用户显式要求的定向 handoff」或「真正阻塞他人」的通知，
- *   且必须检查投递结果；普通进度仍只走文件 checkpoint。
+ *   SendMessage 只用于「用户原始需求显式要求的定向 handoff」，且必须检查投递结果；
+ *   普通进度仅由 harvest 写入文件 checkpoint，不自动读取或注入。
  */
 
 const fs = require('fs')
@@ -96,7 +98,7 @@ function main() {
     JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'SessionStart',
-        additionalContext: `本项目其他 Claude Code 会话的近期进度（自动汇总，仅供参考）：\n${body}${more}`,
+        additionalContext: `本项目其他 Claude Code 会话的近期进度（手动启用的历史工具输出，仅供参考）：\n${body}${more}`,
       },
     })
   )

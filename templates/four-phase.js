@@ -14,6 +14,13 @@ export const meta = {
   ],
 }
 
+function llmAgent(prompt, opts = {}) {
+  return agent(prompt, {
+    ...opts,
+    disallowedTools: [...new Set([...(opts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
+  })
+}
+
 // ---------- CONFIG（改这里） ----------
 const REPO = '<D:/path/to/repo>'
 const TASKS = REPO + '/<openspec/changes/xxx/tasks.md>'
@@ -166,7 +173,7 @@ async function askAdvisor(question, context) {
     return null
   }
   advisorCalls++ // ★ 调用前自增：agent() 失败会返回 null，放调用后会死循环
-  return await agent(
+  return await llmAgent(
     `你是 advisor，任务是给出裁决而非附和。\n\n问题：${question}\n\n上下文：\n${context}\n\n` +
       '如果方案有问题就说 change-approach 并给出具体替代；如果需要用户拍板就说 stop-and-ask。',
     { label: `advisor:${advisorCalls}`, phase: 'Review', model: ADVISOR_MODEL, effort: 'high', schema: ADVISOR_SCHEMA }
@@ -175,7 +182,7 @@ async function askAdvisor(question, context) {
 
 // ---------- Plan ----------
 phase('Plan')
-const plan = await agent(
+const plan = await llmAgent(
   [
     `你是 ${MILESTONE} 的规划者。只规划，不改代码，不 commit。`,
     '',
@@ -211,7 +218,7 @@ const planDigest = [
 
 // ---------- Review ----------
 phase('Review')
-const review = await agent(
+const review = await llmAgent(
   `你是 advisor，只审计划不写代码。尽力找出这份计划会失败的地方，不要附和。\n\n${planDigest}\n\n` +
     'block 条件：根因无 file:line 支撑 / whitelist 与切片文件不一致 / 缺回滚路径 / 把未验证的假设当事实。',
   { label: 'review:plan', phase: 'Review', model: 'fable', effort: 'high', schema: REVIEW_SCHEMA }
@@ -223,7 +230,7 @@ if (review?.verdict === 'block') {
 
 // ---------- Preflight ----------
 phase('Preflight')
-const pre = await agent(
+const pre = await llmAgent(
   [
     '你是环境与基线层。装依赖、建目录、跑一次基线测试，不改业务代码。',
     `基线命令：${plan.testCommands.join(' && ')}`,
@@ -237,7 +244,7 @@ if (pre && !pre.ready) return { status: 'blocked', at: 'Preflight', blockers: pr
 
 // ---------- Implement ----------
 phase('Implement')
-const impl = await agent(
+const impl = await llmAgent(
   [
     '你是实现层。按计划逐切片实现。',
     '',
@@ -266,7 +273,7 @@ if (impl && !impl.done) {
 
 // ---------- Verify ----------
 phase('Verify')
-const verify = await agent(
+const verify = await llmAgent(
   [
     '你是独立验证 + 提交层。不要相信上一层的自述，自己跑一遍。',
     `测试命令：${plan.testCommands.join(' && ')}`,

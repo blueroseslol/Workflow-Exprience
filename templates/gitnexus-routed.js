@@ -51,6 +51,13 @@ export const meta = {
   ],
 }
 
+function llmAgent(prompt, opts = {}) {
+  return agent(prompt, {
+    ...opts,
+    disallowedTools: [...new Set([...(opts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
+  })
+}
+
 // ---------- CONFIG（改这里） ----------
 const REPO = args?.repo ?? '<D:/path/to/repo>'
 const GNX = args?.gitnexusRepo ?? '<indexed-repo-name>'   // list_repos 里的准确名，目录名 ≠ repo 名
@@ -116,31 +123,39 @@ const DIRTY_WORKTREE = args?.dirtyWorktree ?? false
 // 纯 JS FNV-1a:沙箱禁 require/crypto,nochg checkpointKey 的 task 摘要必须与
 // hooks/checkpoint-lib.cjs 同公式,否则跨通道建出两份 state 互相不可见。
 function fnv1aHex(s){let h=0x811c9dc5;const str=String(s||'');for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=(h+((h<<1)+(h<<4)+(h<<7)+(h<<8)+(h<<24)))>>>0}return('0000000'+h.toString(16)).slice(-8)}
-const CHECKPOINT_CACHE_VERSION = 1
+const CHECKPOINT_SCHEMA_VERSION = 2
+const CHECKPOINT_CACHE_VERSION = 2
+const CHECKPOINT_TEMPLATE_KIND = 'gitnexus-routed-v2'
 const CHECKPOINT_KEY = args?.checkpointKey ?? `nochg:${fnv1aHex(TASK)}::${MILESTONE}`
 const CHECKPOINT_META = {
-  kind: 'gitnexus-routed-v1', cacheVersion: CHECKPOINT_CACHE_VERSION, key: CHECKPOINT_KEY,
-  task: TASK, milestone: MILESTONE,
+  kind: CHECKPOINT_TEMPLATE_KIND,
+  schemaVersion: CHECKPOINT_SCHEMA_VERSION,
+  cacheVersion: CHECKPOINT_CACHE_VERSION,
+  key: CHECKPOINT_KEY,
+  task: TASK,
+  milestone: MILESTONE,
+  projectRoot: REPO,
 }
 const PRIOR_STATE = args?.priorState ?? null
 const CHECKPOINT_VALIDATION = args?.checkpointValidation ?? null
-// legacyUnverified 档(cacheVersion=0 存量回填)同样可进 STATE_COMPATIBLE:
-// 信任不由数值担保,由 LEGACY 门强制 CheckpointValidate 担保;绝不伪造 cacheVersion=1。
-const STATE_COMPATIBLE = !!(
-  PRIOR_STATE && PRIOR_STATE.kind === 'ultracode-semantic-state' &&
-  (PRIOR_STATE.cacheVersion === CHECKPOINT_CACHE_VERSION || PRIOR_STATE.legacyUnverified === true) &&
-  PRIOR_STATE.checkpointKey === CHECKPOINT_KEY
-)
+const STATE_KEY_MATCH = !!(PRIOR_STATE && PRIOR_STATE.kind === 'ultracode-semantic-state' && PRIOR_STATE.checkpointKey === CHECKPOINT_KEY)
+const STATE_COMPATIBLE = !!(STATE_KEY_MATCH &&
+  PRIOR_STATE.schemaVersion === CHECKPOINT_SCHEMA_VERSION &&
+  PRIOR_STATE.cacheVersion === CHECKPOINT_CACHE_VERSION &&
+  PRIOR_STATE.templateKind === CHECKPOINT_TEMPLATE_KIND)
 const PRIOR_DIRTY = !!(PRIOR_STATE?.dirtyWorktree === true || CHECKPOINT_VALIDATION?.dirtyWorktree === true)
-const TRUSTED_ARTIFACT_REUSE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && !PRIOR_DIRTY && CHECKPOINT_VALIDATION?.valid === true)
-const LEGACY_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && PRIOR_STATE?.legacyUnverified && CHECKPOINT_VALIDATION?.legacyUnverified === true)
+const TRUSTED_ARTIFACT_REUSE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && !PRIOR_DIRTY &&
+  PRIOR_STATE?.fingerprint?.complete === true && CHECKPOINT_VALIDATION?.valid === true)
+const LEGACY_ARTIFACT_CANDIDATE = !!(STATE_KEY_MATCH && !STATE_COMPATIBLE &&
+  Object.keys(PRIOR_STATE?.decisionApply?.decisions ?? {}).length === 0 && Object.keys(DECIDED).length === 0 &&
+  CHECKPOINT_VALIDATION?.legacyUnverified === true)
 const DIRTY_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && PRIOR_DIRTY && CHECKPOINT_VALIDATION?.valid === true)
-// kind=none 第四门:非 OpenSpec 链 state 无 markdown 指纹,sourceValid 恒 false,
-// 前三门全不成立;codeValid=true 且未 dirty 时给 CheckpointValidate 落点(公式与 openspec 模板一致)。
 const KINDNONE_ARTIFACT_CANDIDATE = !!(STATE_COMPATIBLE && !PRIOR_STATE?.legacyUnverified && !PRIOR_DIRTY &&
+  PRIOR_STATE?.fingerprint?.source?.kind === 'none' && CHECKPOINT_VALIDATION?.dependencyComplete === true &&
   CHECKPOINT_VALIDATION?.codeValid === true && CHECKPOINT_VALIDATION?.sourceValid === false)
 const NEEDS_CHECKPOINT_VALIDATE = LEGACY_ARTIFACT_CANDIDATE || DIRTY_ARTIFACT_CANDIDATE || KINDNONE_ARTIFACT_CANDIDATE
 const ARTIFACT_REUSE = TRUSTED_ARTIFACT_REUSE || NEEDS_CHECKPOINT_VALIDATE
+const HAS_REPLAN_INPUT = !!(REPLAN_FEEDBACK?.length || REPLAN_ATTEMPT > 0 || PRIOR_STATE?.pendingTransition?.status === 'replan-required')
 
 // ---------- 复用常量 ----------
 const S_STR_ARR = { type: 'array', items: { type: 'string' } }
@@ -255,7 +270,7 @@ const DECISION_SCHEMA = {
 const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['verdict', 'rootCause', 'slices', 'whitelist', 'mustNotTouch', 'testCommands', 'predictedImpact', 'decisionPoints', 'openQuestionsForUser'],
+  required: ['verdict', 'rootCause', 'slices', 'whitelist', 'mustNotTouch', 'testCommands', 'evidenceDependencies', 'predictedImpact', 'decisionPoints', 'rollback', 'openQuestionsForUser'],
   properties: {
     verdict: { type: 'string', enum: ['implementable', 'blocked'] },
     rootCause: { type: 'string', description: '根因,必须含【亲自】Read 到的 file:line' },
@@ -463,25 +478,37 @@ const ROUTE_ORDER = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
 const ROUTE_RANK = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 }
 const maxRoute = (a, b) => ROUTE_ORDER[Math.max(ROUTE_ORDER.indexOf(a), ROUTE_ORDER.indexOf(b))]
 const uniq = xs => { const out = []; for (const x of xs ?? []) if (x && !out.includes(x)) out.push(x); return out }
-const decisionKey = o => JSON.stringify(Object.keys(o ?? {}).sort().map(k => [k, o[k]]))
+const canonicalize = value => {
+  if (Array.isArray(value)) return value.map(canonicalize)
+  if (!value || typeof value !== 'object') return value
+  const out = {}
+  for (const key of Object.keys(value).sort()) if (value[key] !== undefined) out[key] = canonicalize(value[key])
+  return out
+}
+const stableStringify = value => JSON.stringify(canonicalize(value))
+const decisionKey = o => stableStringify(o ?? {})
 
-// JS DecisionApply(0 token,openspec 蓝本):把用户拍板应用到 plan 的 slices/whitelist/testCommands。
-// decisionPoints 是唯一拍板早退通道;字符串 openQuestionsForUser 不参与(防 resume 死循环)。
 function applyDecisions(base, decisions) {
   let slices = [...(base.slices ?? [])], whitelist = [...(base.whitelist ?? [])],
     mustNotTouch = [...(base.mustNotTouch ?? [])], testCommands = [...(base.testCommands ?? [])]
-  const unresolved = [], invalid = [], architect = []
+  const unresolved = [], invalid = [], unknown = [], architect = []
+  const known = new Set()
   for (const d of base.decisionPoints ?? []) {
+    if (known.has(d.id)) { invalid.push({ id: d.id, reason: 'duplicate-decision-id' }); continue }
+    known.add(d.id)
+    const labels = (d.options ?? []).map(o => o.label)
+    if (new Set(labels).size !== labels.length) { invalid.push({ id: d.id, reason: 'duplicate-option-label' }); continue }
     if (!(d.id in decisions)) { unresolved.push(d); continue }
     const o = (d.options ?? []).find(x => x.label === decisions[d.id])
     if (!o) { invalid.push({ id: d.id, selected: decisions[d.id] }); continue }
     slices = slices.filter(s => !o.disableSlices.includes(s.id))
     const missing = o.activateSlices.filter(id => !slices.some(s => s.id === id))
-    if (missing.length) invalid.push({ id: d.id, missing })
+    if (missing.length) { invalid.push({ id: d.id, missing }); continue }
     whitelist = uniq(whitelist.concat(o.whitelistAdd)); mustNotTouch = uniq(mustNotTouch.concat(o.mustNotTouchAdd)); testCommands = uniq(testCommands.concat(o.testCommandsAdd))
     if (o.requiresArchitect) architect.push({ decision: d, option: o })
   }
-  return { unresolved, invalid, architect, plan: { ...base, slices, whitelist, mustNotTouch, testCommands } }
+  for (const id of Object.keys(decisions ?? {})) if (!known.has(id)) unknown.push(id)
+  return { unresolved, invalid, unknown, architect, plan: { ...base, slices, whitelist, mustNotTouch, testCommands } }
 }
 
 function computeRouting(recon) {
@@ -578,9 +605,10 @@ function computeRouting(recon) {
 
 // ================= Recon：haiku 建证据地图 =================
 phase('Recon')
-const recon = (TRUSTED_ARTIFACT_REUSE && PRIOR_STATE.recon)
+const reconArtifactHit = !!(TRUSTED_ARTIFACT_REUSE && PRIOR_STATE.recon)
+const recon = reconArtifactHit
   ? PRIOR_STATE.recon
-  : await agent(
+  : await llmAgent(
   [
     '你是 Recon 侦察兵（只读）。你的职责是建立 Repo Evidence Map，**不是**制定实现方案，**更不是**决定难度等级。',
     '',
@@ -616,11 +644,10 @@ log(`路由：score=${routing.score ?? 'failsafe'} → ${routing.route}` + (rout
 
 // 模型链由路由派生
 const plannerModel = (routing.route === 'HIGH' || routing.route === 'CRITICAL') ? MODEL_STRONG : MODEL_DEFAULT
-const implementationModel = IMPLEMENTATION_MODEL_OVERRIDE
+let implementationModel = IMPLEMENTATION_MODEL_OVERRIDE
   ?? (routing.route === 'CRITICAL' ? MODEL_STRONG : MODEL_DEFAULT)
 const reviewModel = MODEL_REVIEW
-const needsReview = ALWAYS_REVIEW || routing.route !== 'LOW'
-const isHighRisk = routing.route === 'HIGH' || routing.route === 'CRITICAL'
+let needsReview = ALWAYS_REVIEW || routing.route !== 'LOW'
 
 // ================= Plan：强模型重读关键代码（Recon 是导航器，不是事实代理） =================
 phase('Plan')
@@ -663,21 +690,22 @@ const dirtyWorktreeDigest = DIRTY_WORKTREE
 // ---------- CheckpointValidate(NEEDS_CHECKPOINT_VALIDATE 时,廉价只读) ----------
 // legacy/dirty/kind=none 的 state 不能把「今天的 hash」当历史真实性:先验证旧 Plan/Review 再决定跳过昂贵模型。
 let priorValidation = null
-const priorPlan = PRIOR_STATE?.effectivePlan ?? PRIOR_STATE?.basePlan ?? null
-if (NEEDS_CHECKPOINT_VALIDATE && priorPlan) {
+const priorBasePlan = PRIOR_STATE?.basePlan ?? null
+const priorEffectivePlan = PRIOR_STATE?.effectivePlan ?? null
+if (NEEDS_CHECKPOINT_VALIDATE && priorBasePlan) {
   phase('Recon')
-  priorValidation = await agent(
+  priorValidation = await llmAgent(
     [
       '你是 CheckpointValidate(廉价只读验证器),不是 Planner。判断历史 Plan/Review 是否仍适用于当前代码与任务。',
       `当前任务:${TASK}`,
       `仓库根:${REPO}; route=${routing.route}; milestone=${MILESTONE}`,
-      `历史 Plan 根因:${priorPlan.rootCause ?? '(无)'}`,
-      `历史切片:\n${(priorPlan.slices ?? []).map(s => `- ${s.id ?? '?'} ${s.title}(${(s.files ?? []).join(', ')})`).join('\n')}`,
-      `历史 whitelist:${(priorPlan.whitelist ?? []).join(', ')}`,
+      `历史 BasePlan 根因:${priorBasePlan.rootCause ?? '(无)'}`,
+      `历史切片:\n${(priorBasePlan.slices ?? []).map(s => `- ${s.id ?? '?'} ${s.title}(${(s.files ?? []).join(', ')})`).join('\n')}`,
+      `历史 whitelist:${(priorBasePlan.whitelist ?? []).join(', ')}`,
       PRIOR_STATE?.review ? `历史 Review verdict=${PRIOR_STATE.review.verdict}` : '历史 Review 缺失',
       PRIOR_DIRTY ? '上轮实现未完成或 Verify 未绿(dirtyWorktree):除代码漂移外,还必须核实已写入 workspace 的部分实现不推翻 Plan/Review 结论;无法核实即 false。' : '',
       PRIOR_STATE?.fingerprint?.source?.kind === 'none' ? '该 state 来自非 OpenSpec 链(sourceKind=none):无 markdown 指纹属预期,重点核实代码侧漂移与任务前提是否仍成立。' : '',
-      '必须亲自定向 Read 历史 slices/whitelist 涉及的代码文件;可用刚完成的 Recon 结果导航,但不得只信历史摘要。',
+      '必须亲自定向 Read 历史 slices/whitelist/evidenceDependencies 涉及的代码文件;不得只信历史摘要。',
       'planStillValid=true 仅当根因/切片/whitelist/tests 仍成立;reviewStillValid=true 还要求历史 verdict=approve 且没有出现会推翻该审阅的新依赖/风险。',
       'requiresArchitect=true 仅当失效修复涉及架构/public API/schema/concurrency/state ownership/persistence/security;机械/局部修复为 false。',
       '任一关键文件无法核实、caller/contract 漂移时对应值必须 false;changedSliceIds 列受影响 slice。',
@@ -689,15 +717,14 @@ if (NEEDS_CHECKPOINT_VALIDATE && priorPlan) {
   else log(`CheckpointValidate${PRIOR_DIRTY ? '(dirty)' : ''}:plan=${priorValidation.planStillValid} review=${priorValidation.reviewStillValid}`)
 }
 
-// Plan artifact hit:历史 route 不低于当前 route 才允许复用(fail-safe,不降级)
 const priorRoute = PRIOR_STATE?.routing?.route ?? null
-const planArtifactHit = !!(ARTIFACT_REUSE && priorPlan
+const basePlanArtifactHit = !!(ARTIFACT_REUSE && priorBasePlan && !HAS_REPLAN_INPUT
   && (TRUSTED_ARTIFACT_REUSE || priorValidation?.planStillValid === true)
   && (!priorRoute || ROUTE_RANK[priorRoute] >= ROUTE_RANK[routing.route]))
 
-const plan = planArtifactHit
-  ? priorPlan
-  : await agent(
+const basePlan = basePlanArtifactHit
+  ? priorBasePlan
+  : await llmAgent(
   [
     `你是 ${MILESTONE} 的规划者（Recon 路由等级 ${routing.route}）。只规划，不改代码，不 commit。`,
     '',
@@ -718,38 +745,93 @@ const plan = planArtifactHit
     '基于你的阅读，预估本次改动会影响的 affectedSymbols / affectedModules / processes，并给出你亲自读码后的风险评级 risk。',
     '**如果你读码后认为实际风险高于 Recon 给的路由等级，如实填更高的 risk —— 这会触发 Plan Risk Gate 升级，不会被忽略。**',
     '',
-    '硬规则：whitelist 精确到文件，凡不在 whitelist 的都进 mustNotTouch。需要用户拍板的一律写 decisionPoints 并预编码 options（含『其他/转人工』选项）；无拍板点的任务 decisionPoints 必须输出 []，不得编造拍板点。openQuestionsForUser 仅用于确实无法预编码选项的开放问题——非空不再触发 need-decision 早退（仅 log 警告按空继续，问题透传实现层），能预编码就必须返回 []。',
+    '硬规则：whitelist/slices.files/evidenceDependencies 只能写目标 repo 内的精确文件路径，不得写 glob 或自然语言；evidenceDependencies 必须列出你验证过但不修改的 caller/public contract/关键测试。whitelist 精确到文件，凡不在 whitelist 的都进 mustNotTouch。需要用户拍板的一律写 decisionPoints 并预编码 options（含『其他/转人工』选项）；无拍板点的任务 decisionPoints 必须输出 []，不得编造拍板点。无法预编码的开放问题必须让 Plan blocked，不得交给 Implement 擅自裁决。',
   ].filter(Boolean).join('\n'),
   { label: 'plan', phase: 'Plan', model: plannerModel, effort: 'high', schema: PLAN_SCHEMA }
 )
-if (planArtifactHit) log('Plan ARTIFACT HIT:复用历史计划')
+if (basePlanArtifactHit) log('BasePlan ARTIFACT HIT:复用历史未应用决议的计划')
 
-if (!plan) return { status: 'failed', at: 'Plan', routing, checkpoint: CHECKPOINT_META }
-if (plan.verdict === 'blocked') return { status: 'blocked', reason: plan.rootCause, questions: plan.openQuestionsForUser, routing, checkpoint: CHECKPOINT_META }
-// 字符串通道不死循环(DECIDED 移出 Plan prompt 后,resume 会 cache HIT 重放同一 plan):
-// openQuestionsForUser 非空仅 log 警告按空继续,问题经 Implement/Advisor prompt 透传实现层裁决。
-if (plan.openQuestionsForUser?.length) {
-  log(`⚠️ Planner 返回 ${plan.openQuestionsForUser.length} 个未预编码开放问题:不触发 need-decision 早退,按空继续(问题透传实现层)`)
+if (!basePlan) return {
+  status: 'failed', at: 'Plan', basePlan: null, effectivePlan: null, plan: null,
+  decisionApply: { decisions: DECIDED, invalid: [], unknown: [] }, reviewInputCanonical: null,
+  artifactCache: { recon: reconArtifactHit, basePlan: false, effectivePlan: false, review: false },
+  routing, checkpoint: CHECKPOINT_META,
 }
-// ★ DECISIONS 绝不进入 Plan prompt(成本红线 #1):拍板由 JS applyDecisions 0 token 应用,
-// 续跑时 Plan prompt 未变可 HIT;decisionPoints 有未拍板项才 need-decision 早退。
-const applied = applyDecisions(plan, DECIDED)
-if (applied.invalid.length) log(`⚠️ DecisionApply 无效项:${JSON.stringify(applied.invalid)}`)
-if (applied.unresolved.length) {
+if (basePlan.verdict === 'blocked' || basePlan.openQuestionsForUser?.length) {
   return {
-    status: 'need-decision',
-    milestone: MILESTONE,
-    questions: applied.unresolved.map(d => d.question),
-    decisionPoints: applied.unresolved,
-    plan,
-    routing,
-    checkpoint: CHECKPOINT_META,
+    status: 'blocked', at: 'Plan', reason: basePlan.rootCause,
+    questions: basePlan.openQuestionsForUser, basePlan, effectivePlan: null, plan: basePlan,
+    decisionApply: { decisions: DECIDED, invalid: [], unknown: [] }, reviewInputCanonical: null,
+    artifactCache: { recon: reconArtifactHit, basePlan: basePlanArtifactHit, effectivePlan: false, review: false },
+    routing, checkpoint: CHECKPOINT_META,
   }
 }
-const effectivePlan = applied.plan
-// requiresArchitect 拍板项:openspec 链会走强模型 PlanDelta;本链简化为由 Review/Audit 对抗兜底(记录在案)。
-if (applied.architect.length) {
-  log(`⚠️ ${applied.architect.length} 个拍板项标记 requiresArchitect:本链无 PlanDelta 机制,已应用选项并由 Review/Audit 兜底`)
+const applied = applyDecisions(basePlan, DECIDED)
+if (applied.invalid.length || applied.unknown.length) {
+  return {
+    status: 'blocked', at: 'DecisionApply', invalid: applied.invalid, unknown: applied.unknown,
+    basePlan, effectivePlan: null, plan: basePlan,
+    decisionApply: { decisions: DECIDED, invalid: applied.invalid, unknown: applied.unknown },
+    reviewInputCanonical: null,
+    artifactCache: { recon: reconArtifactHit, basePlan: basePlanArtifactHit, effectivePlan: false, review: false },
+    routing, checkpoint: CHECKPOINT_META,
+  }
+}
+if (applied.unresolved.length) {
+  return {
+    status: 'need-decision', milestone: MILESTONE,
+    questions: applied.unresolved.map(d => d.question), decisionPoints: applied.unresolved,
+    basePlan, effectivePlan: null, plan: basePlan,
+    decisionApply: { decisions: DECIDED, invalid: [], unknown: [] },
+    reviewInputCanonical: null,
+    artifactCache: { recon: reconArtifactHit, basePlan: basePlanArtifactHit, effectivePlan: false, review: false },
+    routing, checkpoint: CHECKPOINT_META,
+  }
+}
+const sameDecisions = decisionKey(DECIDED) === decisionKey(PRIOR_STATE?.decisionApply?.decisions)
+const derivedEffectivePlan = applied.plan
+const effectivePlanArtifactHit = !!(basePlanArtifactHit && sameDecisions && priorEffectivePlan
+  && stableStringify(derivedEffectivePlan) === stableStringify(priorEffectivePlan))
+const effectivePlan = effectivePlanArtifactHit ? priorEffectivePlan : derivedEffectivePlan
+const architectureDecisionGate = applied.architect.length > 0
+const architectureChoices = applied.architect.map(({ decision, option }) => ({
+  decisionId: decision.id,
+  selected: option.label,
+  consequence: option.consequence,
+}))
+let reviewArtifactHit = false
+const reviewInputCanonical = stableStringify({
+  contract: CHECKPOINT_TEMPLATE_KIND,
+  task: TASK,
+  milestone: MILESTONE,
+  effectivePlan,
+  route: routing.route,
+  routeScore: routing.score,
+  uncertaintyScore: routing.uncertaintyScore,
+  forcedEscalations: routing.forcedEscalations,
+  reviewModel,
+  architectureDecisionGate,
+  architectureChoices,
+})
+const artifactCache = () => ({
+  recon: reconArtifactHit,
+  basePlan: basePlanArtifactHit,
+  effectivePlan: effectivePlanArtifactHit,
+  review: reviewArtifactHit,
+})
+const withPlanState = fields => ({
+  ...fields,
+  basePlan,
+  effectivePlan,
+  plan: effectivePlan,
+  decisionApply: { decisions: DECIDED, invalid: [], unknown: [], architectureChoices },
+  reviewInputCanonical,
+  artifactCache: artifactCache(),
+})
+if (architectureDecisionGate) {
+  needsReview = true
+  implementationModel = MODEL_STRONG
+  log(`架构决议强门:${applied.architect.length} 个 requiresArchitect 选择将强制 Review/强实现模型/Final Audit`)
 }
 
 // ---------- Plan Risk Gate（JS）：Recon 误判的第二次纠偏，升级粘滞 ----------
@@ -761,17 +843,16 @@ if (applied.architect.length) {
 const plannedRank = ROUTE_RANK[effectivePlan.predictedImpact?.risk] ?? 0
 if (plannedRank > ROUTE_RANK[routing.route]) {
   log(`⚠️ Plan Risk Gate：Planner 自评 ${effectivePlan.predictedImpact.risk} 高于 Recon 路由 ${routing.route}，早退升级（minRoute 粘滞）`)
-  return {
+  return withPlanState({
     status: 'route-escalation-required',
     from: routing.route,
     to: effectivePlan.predictedImpact.risk,
     nextArgs: { minRoute: effectivePlan.predictedImpact.risk },
     reason: 'Planner 亲自读码后评估的风险高于 Recon 预判。同 session 用 resumeFromRunId + 首轮 args 叠加 nextArgs 续跑（Recon 缓存命中，仅升级段重跑）；跨 session 才开新 workflow 并带上 minRoute。升级即粘滞，不会在 Recon 处回落',
     recon,
-    plan: effectivePlan,
     routing,
     checkpoint: CHECKPOINT_META,
-  }
+  })
 }
 
 const planDigest = [
@@ -787,13 +868,15 @@ const planDigest = [
 let review = null
 if (needsReview) {
   phase('Review')
-  // Review artifact hit:decisions 未变 + 历史 verdict=approve + 验证通过 + Plan 本身 HIT 才复用
-  const reviewArtifactHit = !!(planArtifactHit && PRIOR_STATE?.review?.verdict === 'approve'
+  // Review artifact hit：只复用与当前 EffectivePlan 和完整审阅上下文完全相同的已批准结果。
+  reviewArtifactHit = !!(effectivePlanArtifactHit && PRIOR_STATE?.reviewReusable === true
+    && PRIOR_STATE?.review?.verdict === 'approve'
     && (TRUSTED_ARTIFACT_REUSE || priorValidation?.reviewStillValid === true)
-    && decisionKey(DECIDED) === decisionKey(PRIOR_STATE?.decisionApply?.decisions))
+    && PRIOR_STATE?.reviewInputCanonical === reviewInputCanonical
+    && (!priorRoute || ROUTE_RANK[priorRoute] >= ROUTE_RANK[routing.route]))
   review = reviewArtifactHit
     ? PRIOR_STATE.review
-    : await agent(
+    : await llmAgent(
     [
       '你是独立审阅者（GPT-5.6 Sol）。**你不是第二个 Planner，你的任务是反驳这份计划，不是附和。**',
       '',
@@ -809,17 +892,20 @@ if (needsReview) {
       '不接受「这个方案可能存在风险」这类没有证据的意见 —— 那种一律不进 blockers。',
       '',
       `路由上下文：route=${routing.route}，uncertainty=${routing.uncertaintyScore}。不确定项越多，你越该倾向 revise/block。`,
+      architectureDecisionGate
+        ? `架构决议强门已启用。必须逐项复核这些用户选择及其后果：\n${architectureChoices.map(x => `- ${x.decisionId}=${x.selected}：${x.consequence}`).join('\n')}`
+        : '',
     ].join('\n'),
     { label: 'review:plan', phase: 'Review', model: reviewModel, effort: 'high', schema: REVIEW_SCHEMA }
   )
-  if (reviewArtifactHit) log('Review ARTIFACT HIT:decisions 未变且历史 approve,复用历史审阅')
+  if (reviewArtifactHit) log('Review ARTIFACT HIT:EffectivePlan 与完整审阅上下文一致且历史审阅可复用')
 
   // fail-closed：该审却审不出结果（agent 未返回）→ 早退，不放行到后续阶段
   if (!review) {
-    return { status: 'failed', at: 'Review', reason: 'review agent 未返回结构化结果（fail-closed，不进入实现）', plan: effectivePlan, routing, checkpoint: CHECKPOINT_META }
+    return withPlanState({ status: 'failed', at: 'Review', reason: 'review agent 未返回结构化结果（fail-closed，不进入实现）', routing, checkpoint: CHECKPOINT_META })
   }
   if (review.verdict === 'block') {
-    return { status: 'blocked', at: 'Review', blockers: review.blockers, plan: effectivePlan, routing, checkpoint: CHECKPOINT_META }
+    return withPlanState({ status: 'blocked', at: 'Review', blockers: review.blockers, review, routing, checkpoint: CHECKPOINT_META })
   }
   // revise 不带病进 Implement：实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的「whitelist 过窄」。
   // 早退交回意见，并把累计意见 + replanAttempt 作为 nextArgs 带回 —— 续跑时二者都拼进 Plan prompt
@@ -828,30 +914,28 @@ if (needsReview) {
     const roundFeedback = review.blockers.map(b => `${b.issue}（${b.evidence}）`).concat(review.concerns)
     // fail-closed：revise 却不给任何修订意见 → 续跑只会原样重放同一 Plan/Review，直接 blocked 转人工
     if (!roundFeedback.length) {
-      return {
+      return withPlanState({
         status: 'blocked',
         at: 'Review',
         reason: 'Review 判 revise 但 blockers/concerns 均为空，无可吸收的修订意见（fail-closed，不进入无推进的 replan 循环）',
-        plan: effectivePlan,
         review,
         routing,
         checkpoint: CHECKPOINT_META,
-      }
+      })
     }
     const attempt = REPLAN_ATTEMPT + 1
     // 有界：超过上限仍 revise → 转人工，不再自动续跑
     if (attempt > MAX_REPLAN) {
-      return {
+      return withPlanState({
         status: 'blocked',
         at: 'Review',
         reason: `重规划已达上限 ${MAX_REPLAN} 次，Review 仍判 revise，转人工处理`,
         replanHistory: REPLAN_FEEDBACK ?? [],
         latestFeedback: roundFeedback,
-        plan: effectivePlan,
         review,
         routing,
         checkpoint: CHECKPOINT_META,
-      }
+      })
     }
     // 累计反馈 + attempt 都拼进下一轮 Plan prompt（prompt 进缓存键）：
     // 即使 Review 逐字重复同一意见，prompt 也每轮不同 → Plan 必重跑，杜绝无限重放
@@ -859,7 +943,7 @@ if (needsReview) {
     // 但若上轮 Advisor replan 留下的残留还在（DIRTY_WORKTREE=true），必须继续让 Planner 知情
     const replanFeedback = (REPLAN_FEEDBACK ?? []).concat(roundFeedback)
     log(`Review=revise：早退 replan-required（第 ${attempt}/${MAX_REPLAN} 次），累计反馈与 attempt 随 nextArgs 注入 Plan prompt，不进入实现`)
-    return {
+    return withPlanState({
       status: 'replan-required',
       milestone: MILESTONE,
       replanAttempt: attempt,
@@ -867,10 +951,10 @@ if (needsReview) {
       dirtyWorktree: DIRTY_WORKTREE,
       nextArgs: { replanFeedback, replanAttempt: attempt, dirtyWorktree: DIRTY_WORKTREE },
       reason: 'Review 判 revise。同 session 用 resumeFromRunId + 首轮 args 叠加 nextArgs 续跑：Recon 缓存命中，累计 replanFeedback 与 replanAttempt 改变 Plan prompt → Plan 及之后重跑并吸收修订意见；超过 maxReplan 次仍 revise 将 blocked 转人工。',
-      plan: effectivePlan,
+      review,
       routing,
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
 } else {
   log('路由 LOW 且 alwaysReview=false，跳过 Review（可在 args 传 alwaysReview:true 强制开启）')
@@ -878,7 +962,7 @@ if (needsReview) {
 
 // ================= Preflight：haiku 建测试基线（fail-closed） =================
 phase('Preflight')
-const pre = await agent(
+const pre = await llmAgent(
   [
     '你是环境与基线层。装依赖、建目录、跑一次基线测试，不改业务代码。',
     `基线命令：${effectivePlan.testCommands.join(' && ')}`,
@@ -890,8 +974,8 @@ const pre = await agent(
 )
 
 // fail-closed：agent 未返回也算失败，不放行（故障偏向质量）
-if (!pre) return { status: 'failed', at: 'Preflight', reason: 'preflight agent 未返回', routing, checkpoint: CHECKPOINT_META }
-if (!pre.ready) return { status: 'blocked', at: 'Preflight', blockers: pre.blockers, routing, checkpoint: CHECKPOINT_META }
+if (!pre) return withPlanState({ status: 'failed', at: 'Preflight', reason: 'preflight agent 未返回', review, routing, checkpoint: CHECKPOINT_META })
+if (!pre.ready) return withPlanState({ status: 'blocked', at: 'Preflight', blockers: pre.blockers, review, preflight: pre, routing, checkpoint: CHECKPOINT_META })
 
 // ================= Implement：Kimi/Opus 主实现 + 有界 Fable Advisor Loop =================
 phase('Implement')
@@ -936,7 +1020,7 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
       ].join('\n')
     : ''
 
-  impl = await agent(
+  impl = await llmAgent(
     [
       '你是实现层。按计划逐切片实现。',
       '',
@@ -977,48 +1061,52 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
   )
 
   if (!impl) {
-    return {
+    return withPlanState({
       status: 'failed',
       at: 'Implement',
       reason: 'implement agent 未返回结构化结果',
-      plan: effectivePlan,
+      review,
+      preflight: pre,
       routing,
       implementationAdvisor: implementationAdvisorSummary(),
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
   if (impl.done) break
 
   if (!impl.needsAdvisor) {
-    return {
+    return withPlanState({
       status: 'escalate',
       at: 'Implement',
       reason: impl.notImplemented.join('；') || impl.honesty || '实现未完成且未请求顾问',
       notImplemented: impl.notImplemented,
-      plan: effectivePlan,
+      impl,
+      review,
+      preflight: pre,
       routing,
       implementationAdvisor: implementationAdvisorSummary(),
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
 
   if (!impl.advisorQuestion || !impl.blockingEvidence.length) {
-    return {
+    return withPlanState({
       status: 'failed',
       at: 'ImplementAdvisor',
       reason: 'needsAdvisor=true 但缺少 advisorQuestion 或 blockingEvidence',
       impl,
-      plan: effectivePlan,
+      review,
+      preflight: pre,
       routing,
       implementationAdvisor: implementationAdvisorSummary(),
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
 
   if (advisorCalls >= ADVISOR_MAX) {
     if (implementationModel !== MODEL_STRONG) {
       escalationRequested = true
-      return {
+      return withPlanState({
         status: 'implementation-escalation-required',
         from: implementationModel,
         to: MODEL_STRONG,
@@ -1029,27 +1117,29 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
         },
         reason: '有界 Advisor Loop 已达上限；同 session 用原 scriptPath + resumeFromRunId + 首轮 args 叠加 nextArgs，仅 Implement 及后续因 model/prompt 改变而重跑。',
         impl,
-        plan: effectivePlan,
+        review,
+        preflight: pre,
         routing,
         implementationAdvisor: implementationAdvisorSummary(),
         checkpoint: CHECKPOINT_META,
-      }
+      })
     }
-    return {
+    return withPlanState({
       status: 'escalate',
       at: 'Implement',
       reason: `强实现模型 + ${ADVISOR_MAX} 次顾问仍无法收敛，转人工/用户拍板`,
       impl,
-      plan: effectivePlan,
+      review,
+      preflight: pre,
       routing,
       implementationAdvisor: implementationAdvisorSummary(),
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
 
   // ★ 必须在 agent() 调用前自增：失败/null 也计入上限，避免死循环
   advisorCalls++
-  const advice = await agent(
+  const advice = await llmAgent(
     [
       '你是 Implement Advisor（只读顾问），任务是给出裁决而不是接管代码。',
       `仓库根：${REPO}`,
@@ -1079,16 +1169,17 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
   )
 
   if (!advice) {
-    return {
+    return withPlanState({
       status: 'failed',
       at: 'ImplementAdvisor',
       reason: 'advisor agent 未返回结构化结果（fail-closed）',
       impl,
-      plan: effectivePlan,
+      review,
+      preflight: pre,
       routing,
       implementationAdvisor: implementationAdvisorSummary(),
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
 
   advisorHistory.push({
@@ -1100,16 +1191,17 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
   })
 
   if (advice.verdict === 'stop-and-ask') {
-    return {
+    return withPlanState({
       status: 'need-decision',
       milestone: MILESTONE,
       questions: [advice.nextStep],
       impl,
-      plan: effectivePlan,
+      review,
+      preflight: pre,
       routing,
       implementationAdvisor: implementationAdvisorSummary(),
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
 
   if (advice.verdict === 'replan') {
@@ -1120,21 +1212,23 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
       ...advice.evidence.map(x => `证据：${x}`),
     ]
     if (replanAttempt > MAX_REPLAN) {
-      return {
+      return withPlanState({
         status: 'blocked',
         at: 'ImplementAdvisor',
         reason: `重规划已达上限 ${MAX_REPLAN} 次，Implement Advisor 仍要求 replan，转人工`,
-        plan: effectivePlan,
+        impl,
+        review,
+        preflight: pre,
         routing,
         implementationAdvisor: implementationAdvisorSummary(),
         checkpoint: CHECKPOINT_META,
-      }
+      })
     }
     const replanFeedback = (REPLAN_FEEDBACK ?? []).concat(advisorFeedback)
     // ⚠️ 与 Review=revise 的 replan 不同：本轮 Implement 已运行，工作区带着 provisional
     // implementation 的残留 diff。必须让下一轮 Planner 知情并逐块裁决 retain/replace，
     // 否则它会把旧方案残留误当现状基线，新旧实现混杂。
-    return {
+    return withPlanState({
       status: 'replan-required',
       milestone: MILESTONE,
       replanAttempt,
@@ -1143,17 +1237,18 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
       nextArgs: { replanFeedback, replanAttempt, dirtyWorktree: true },
       reason: 'Implement Advisor 判断 Plan 本身需要修订；复用现有 replanFeedback/replanAttempt 机制，不创建第二套循环。本轮 Implement 已落盘部分实现，nextArgs.dirtyWorktree=true：下一轮 Planner 必须先审阅 git status/git diff，对残留 hunk 逐块决定 retain/replace，不得误当现状自动继承。',
       impl,
-      plan: effectivePlan,
+      review,
+      preflight: pre,
       routing,
       implementationAdvisor: implementationAdvisorSummary(),
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
 
   if (advice.verdict === 'escalate-implementation') {
     if (implementationModel !== MODEL_STRONG) {
       escalationRequested = true
-      return {
+      return withPlanState({
         status: 'implementation-escalation-required',
         from: implementationModel,
         to: MODEL_STRONG,
@@ -1163,43 +1258,46 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
         },
         reason: 'Advisor 判断当前实现模型不适合继续；只升级 Implement model，不把整个 route 改成 CRITICAL。',
         impl,
-        plan: effectivePlan,
+        review,
+        preflight: pre,
         routing,
         implementationAdvisor: implementationAdvisorSummary(),
         checkpoint: CHECKPOINT_META,
-      }
+      })
     }
-    return {
+    return withPlanState({
       status: 'escalate',
       at: 'Implement',
       reason: '当前已是强实现模型，Advisor 仍要求升级，转人工/用户拍板',
       impl,
-      plan: effectivePlan,
+      review,
+      preflight: pre,
       routing,
       implementationAdvisor: implementationAdvisorSummary(),
       checkpoint: CHECKPOINT_META,
-    }
+    })
   }
 
   // continue / change-approach：下一轮仍由原实现模型执行，并把 advisorHistory 注入 prompt
 }
 
 if (!impl?.done) {
-  return {
+  return withPlanState({
     status: 'escalate',
     at: 'Implement',
     reason: 'Implement Advisor Loop 结束但实现仍未完成',
     impl,
-    plan: effectivePlan,
+    review,
+    preflight: pre,
     routing,
     implementationAdvisor: implementationAdvisorSummary(),
     checkpoint: CHECKPOINT_META,
-  }
+  })
 }
 
 // ================= Verify：haiku 机械核对 + GitNexus 实测爆炸半径（只验证，不提交） =================
 phase('Verify')
-const verify = await agent(
+const verify = await llmAgent(
   [
     '你是独立验证层。不要相信上一层的自述，自己跑一遍。**只验证，绝不 commit**（提交统一由后续 Commit 层负责）。',
     `测试命令：${effectivePlan.testCommands.join(' && ')}`,
@@ -1241,17 +1339,20 @@ if (effectivePlan?.predictedImpact && verify?.actualImpact) {
   }
 }
 
-// ================= Final Audit：CRITICAL 必跑；任意 route 出现 routeMiss 即触发 =================
+// ================= Final Audit：CRITICAL、架构决议强门必跑；任意 route 出现 routeMiss 即触发 =================
 // LOW 的 routeMiss 反而比 HIGH 更值得审计——它意味着前面的 Recon+Planner 都低估了爆炸范围。
-const needsAudit = routing.route === 'CRITICAL' || routeMiss
+const needsAudit = routing.route === 'CRITICAL' || routeMiss || architectureDecisionGate
 let audit = null
 if (needsAudit) {
   phase('Audit')
-  audit = await agent(
+  audit = await llmAgent(
     [
       '你是最终审计者（GPT-5.6 Sol），独立于 Plan/Implement/Verify 之外做最后把关。',
       '',
-      `路由：${routing.route}` + (routeMiss ? `，且出现 routeMiss（实测影响超预估）` : ''),
+      `路由：${routing.route}` + (routeMiss ? `，且出现 routeMiss（实测影响超预估）` : '') + (architectureDecisionGate ? '，且架构决议强门已启用' : ''),
+      architectureDecisionGate
+        ? `架构决议：\n${architectureChoices.map(x => `- ${x.decisionId}=${x.selected}：${x.consequence}`).join('\n')}`
+        : '',
       `计划：\n${planDigest}`,
       `实现者自述：filesChanged=${(impl?.filesChanged ?? []).map(f => f.path).join(', ')}；notImplemented=${(impl?.notImplemented ?? []).join('；') || '无'}`,
       `验证结果：status=${verify?.status ?? '?'}，${verify?.testPassed ?? '?'}/${verify?.testTotal ?? '?'} 通过`,
@@ -1275,7 +1376,10 @@ if (needsAudit) {
 // ================= Commit Gate（JS）→ Commit（所有等级统一在此提交） =================
 // 需要审计但 audit 缺失 → fail-closed 早退，绝不提交
 if (needsAudit && !audit) {
-  return { status: 'failed', at: 'Audit', reason: '需要 Final Audit 但 audit agent 未返回结构化结果（fail-closed，不提交）', verify, routing, checkpoint: CHECKPOINT_META }
+  return withPlanState({
+    status: 'failed', at: 'Audit', reason: '需要 Final Audit 但 audit agent 未返回结构化结果（fail-closed，不提交）',
+    review, preflight: pre, impl, implementationAdvisor: implementationAdvisorSummary(), verify, routing, checkpoint: CHECKPOINT_META,
+  })
 }
 // 最终 status 必须吸收 audit verdict：needsAudit 时必须 audit=accept 才放行
 const auditBlocks = needsAudit && audit.verdict !== 'accept'
@@ -1283,7 +1387,7 @@ const commitExpected = REQUIRE_COMMIT && verify?.status === 'green' && !auditBlo
 let commitResult = null
 if (commitExpected) {
   phase('Commit')
-  commitResult = await agent(
+  commitResult = await llmAgent(
     [
       '你是提交层。验证已全绿、审计已通过，现在提交。',
       `${K_GIT_SAFE}`,
@@ -1313,8 +1417,12 @@ return {
   milestone: MILESTONE,
   ts: TS,
   checkpoint: CHECKPOINT_META,
-  decisionApply: { decisions: DECIDED },
+  basePlan,
+  effectivePlan,
   plan: effectivePlan,
+  decisionApply: { decisions: DECIDED, invalid: [], unknown: [], architectureChoices },
+  reviewInputCanonical,
+  artifactCache: artifactCache(),
   review,
   preflight: pre,
   impl,
@@ -1332,6 +1440,8 @@ return {
     plannerModel,
     implementationModel,
     reviewModel: needsReview ? reviewModel : null,
+    architectureDecisionGate,
+    architectureChoices,
     reasons: routing.reasons,
     forcedEscalations: routing.forcedEscalations,
     uncertaintyScore: routing.uncertaintyScore,

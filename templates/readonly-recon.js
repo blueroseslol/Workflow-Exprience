@@ -11,6 +11,13 @@ export const meta = {
   ],
 }
 
+function llmAgent(prompt, opts = {}) {
+  return agent(prompt, {
+    ...opts,
+    disallowedTools: [...new Set([...(opts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
+  })
+}
+
 const REPO = args?.repo ?? '<D:/path/to/repo>'
 const GITNEXUS_REPO = args?.gitnexusRepo ?? '<indexed-repo-name>'
 
@@ -92,7 +99,7 @@ phase('Recon')
 const recon = (
   await parallel(
     ANGLES.map(a => () =>
-      agent(a.prompt + HARD_RULES, {
+      llmAgent(a.prompt + HARD_RULES, {
         label: a.label,
         phase: 'Recon',
         model: 'sonnet',
@@ -118,7 +125,7 @@ const digest = recon
   .join('\n\n')
 
 phase('Synthesize')
-const synthesis = await agent(
+const synthesis = await llmAgent(
   [
     '基于下面的调研报告，产出一份结论（中文 Markdown）。',
     '',
