@@ -93,12 +93,13 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 ├── hooks/                   三个默认注册 hook，全部实测通过
 │   ├── hooks.json
 │   ├── checkpoint-lib.cjs     语义 checkpoint：建档/验证/resolver/backfill（v0.4.3 legacy+kind=none）
-│   ├── harvest-workflow.cjs   Stop：固化 run + 写进度（v0.4.3 指纹续收 + raw .rN 版本化）
+│   ├── harvest-workflow.cjs   Stop：固化 run + 写进度 + Haiku 上下文失败续起（v0.4.5）
 │   ├── skill-pointer.cjs      PreToolUse(Skill)：注入一行路径指针
 │   ├── peer-progress.cjs      历史/手动读取工具（保留文件，默认不注册、不自动注入）
 │   └── workflow-intake.cjs    UserPromptSubmit：workflow 前缀 → 意图路由 + checkpoint resolver
 ├── tools/
 │   ├── scan-corpus.mjs      人工触发的语料分析（替代被砍掉的自动闭环）
+│   ├── verify-model-fallback.mjs 上下文分类→Stop 续起→Sonnet phase override 离线验证
 │   └── verify-state-pipeline.mjs 语义缓存管道端到端检查（v0.4.3，含 LDL_UGC 干跑）
 ├── legacy/                  codex 深链接接力（独立能力，不参与 plugin 打包）
 └── docs/decisions/          ADR
@@ -110,7 +111,7 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 
 | Hook | 事件 | 行为 |
 |---|---|---|
-| `harvest-workflow` | `Stop` | 轮询 `wf_*.json` 终态 → 复制到 `<项目>/docs/ultracode/raw/` + 追加 `index.jsonl` + 写 `.claude/progress/<sessionId>.jsonl` |
+| `harvest-workflow` | `Stop` | 固化 `wf_*.json` + 写 index/progress；明确 Haiku 上下文失败时阻止停止一次并要求 Sonnet 恢复 |
 | `skill-pointer` | `PreToolUse(Skill)` | 命中 `workflow-authoring` 时注入 ~30 token 的路径指针 |
 | `workflow-intake` | `UserPromptSubmit` | 在消息首个非空白字符处匹配 `workflow ` / `/workflow ` 前缀 → 注入意图路由指令（兼容旧前缀 `workflow-experience `；正文、代码块/引用内提及不触发） |
 
@@ -118,9 +119,11 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 
 **v0.4.4 消息边界**：顶层 Workflow DSL 没有 peer primitive，但 LLM 子代理可能拥有 `ListAgents` / `SendMessage`。五个 `templates/*.js` 成品模板及仍可执行的 `legacy/codex-relay.workflow.js` 统一让每次 agent 调用经过 wrapper，在保留调用点原有 `disallowedTools` 的同时硬禁这两个工具；不依赖 prompt 自律。
 
+**v0.4.5 Haiku 上下文恢复**：Workflow DSL 在运行中只把失败的 `agent()` 暴露为 `null`，无法区分用户跳过、权限、网络、schema 与上下文错误，因此插件不会对普通 `null` 盲目重试。Stop/harvest 会从终态 `workflowProgress/logs` 精确识别 `Prompt is too long`、自动压缩失败和空摘要；仅当失败来自 Haiku lane 且整个 run 未成功时，输出一次 `decision:block` 续起主会话，要求用原 `scriptPath + resumeFromRunId`，把失败 phase 的模型参数改成 `sonnet`。恢复指令强制先核对工作区、测试与最近提交，避免重复副作用；同一终态指纹只触发一次。五个成品模板已补齐 `reconModel/preflightModel/verifyModel/commitModel` 等按阶段覆盖参数。
+
 只有当前用户的原始需求显式要求 handoff 时，workflow 才把它保留为执行契约；workflow 返回 terminal result 后，外层 Claude Code 主会话才可定向执行 `ListAgents` / `SendMessage`。普通并行开发、历史 checkpoint 或其他会话的存在都不得触发即时消息。
 
 三个默认注册 hook 的共同纪律：
-- 任何异常都静默 `exit 0`，绝不阻断会话
-- `harvest` 第一件事查 `stop_hook_active`，防递归
+- 任何 hook 自身异常都静默 `exit 0`；只有明确 Haiku context/compaction 失败会有意 `decision:block`
+- `harvest` 第一件事读取 `stop_hook_active`；被它续起后的 Stop 只固化、不再次阻止
 - 跨轮次游标存 `os.tmpdir()`，因为 workflow 是后台任务，Stop 触发时文件可能还没落盘

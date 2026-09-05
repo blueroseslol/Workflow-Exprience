@@ -74,6 +74,8 @@ const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet' // Kimi K3
 const MODEL_STRONG = args?.strongModel ?? 'opus'     // Claude Opus 5
 const MODEL_REVIEW = args?.reviewModel ?? 'fable'    // GPT-5.6 Sol
 const MODEL_VERIFY = args?.verifyModel ?? 'haiku'    // DeepSeek V4 Flash
+const MODEL_PREFLIGHT = args?.preflightModel ?? MODEL_VERIFY
+const MODEL_COMMIT = args?.commitModel ?? MODEL_VERIFY
 // Implement 顾问：默认 fable，只做只读裁决；最多 3 次，仍不收敛才升级实现模型
 const ADVISOR_MODEL = args?.advisorModel ?? MODEL_REVIEW
 const ADVISOR_MAX = args?.advisorMax ?? 3
@@ -970,7 +972,7 @@ const pre = await llmAgent(
     '如实报告 —— 基线本来就红就写红，不要试图修好它（那是 Implement 层的事）。',
     K_FAIL_LOUD,
   ].join('\n'),
-  { label: 'preflight', phase: 'Preflight', model: MODEL_VERIFY, schema: PREFLIGHT_SCHEMA }
+  { label: 'preflight', phase: 'Preflight', model: MODEL_PREFLIGHT, schema: PREFLIGHT_SCHEMA }
 )
 
 // fail-closed：agent 未返回也算失败，不放行（故障偏向质量）
@@ -1395,7 +1397,7 @@ if (commitExpected) {
       '把 commit hash 填进 commits，committed 置 true。',
       K_FAIL_LOUD,
     ].join('\n'),
-    { label: 'commit', phase: 'Commit', model: MODEL_VERIFY, schema: COMMIT_SCHEMA }
+    { label: 'commit', phase: 'Commit', model: MODEL_COMMIT, schema: COMMIT_SCHEMA }
   )
 } else if (REQUIRE_COMMIT) {
   log(`Commit Gate 拦截：verify=${verify?.status ?? '?'}，audit=${audit?.verdict ?? '（无）'} → 不提交`)

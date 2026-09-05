@@ -26,6 +26,11 @@ const REPO = '<D:/path/to/repo>'
 const TASKS = REPO + '/<openspec/changes/xxx/tasks.md>'
 const MILESTONE = '<5.4>'
 const TS = args?.ts ?? 'unknown-ts'                 // 时间戳必须外部注入：脚本内 Date.now() 会 throw
+const MODEL_PLAN = args?.planModel ?? 'opus'
+const MODEL_REVIEW = args?.reviewModel ?? 'fable'
+const MODEL_PREFLIGHT = args?.preflightModel ?? 'haiku'
+const MODEL_IMPLEMENT = args?.implementModel ?? 'sonnet'
+const MODEL_VERIFY = args?.verifyModel ?? 'haiku'
 const ADVISOR_MODEL = args?.advisorModel ?? 'fable' // 传 'opus' 可切换
 const ADVISOR_MAX = args?.advisorMax ?? 5
 
@@ -199,7 +204,7 @@ const plan = await llmAgent(
     '- whitelist 要精确到文件；凡不在 whitelist 的都要进 mustNotTouch。',
     '- 若存在你无法自行决定的问题，写进 openQuestionsForUser，不要自作主张。',
   ].join('\n'),
-  { label: 'plan', phase: 'Plan', model: 'opus', effort: 'high', schema: PLAN_SCHEMA }
+  { label: 'plan', phase: 'Plan', model: MODEL_PLAN, effort: 'high', schema: PLAN_SCHEMA }
 )
 
 if (!plan) return { status: 'failed', at: 'Plan' }
@@ -221,7 +226,7 @@ phase('Review')
 const review = await llmAgent(
   `你是 advisor，只审计划不写代码。尽力找出这份计划会失败的地方，不要附和。\n\n${planDigest}\n\n` +
     'block 条件：根因无 file:line 支撑 / whitelist 与切片文件不一致 / 缺回滚路径 / 把未验证的假设当事实。',
-  { label: 'review:plan', phase: 'Review', model: 'fable', effort: 'high', schema: REVIEW_SCHEMA }
+  { label: 'review:plan', phase: 'Review', model: MODEL_REVIEW, effort: 'high', schema: REVIEW_SCHEMA }
 )
 
 if (review?.verdict === 'block') {
@@ -237,7 +242,7 @@ const pre = await llmAgent(
     '把真实的测试数字与 typecheck 退出码填进 schema。',
     K_FAIL_LOUD,
   ].join('\n'),
-  { label: 'preflight', phase: 'Preflight', model: 'haiku', schema: PREFLIGHT_SCHEMA }
+  { label: 'preflight', phase: 'Preflight', model: MODEL_PREFLIGHT, schema: PREFLIGHT_SCHEMA }
 )
 
 if (pre && !pre.ready) return { status: 'blocked', at: 'Preflight', blockers: pre.blockers }
@@ -257,7 +262,7 @@ const impl = await llmAgent(
     '- 不要 commit，不要 push（Verify 层负责）。',
     '- 计划里有而你没做的，必须写进 notImplemented，不许假装做了。',
   ].join('\n'),
-  { label: 'implement', phase: 'Implement', model: 'sonnet', effort: 'xhigh', schema: IMPLEMENT_SCHEMA }
+  { label: 'implement', phase: 'Implement', model: MODEL_IMPLEMENT, effort: 'xhigh', schema: IMPLEMENT_SCHEMA }
 )
 
 // 实现受阻时求助 advisor
@@ -284,7 +289,7 @@ const verify = await llmAgent(
     `commit message 引用 ${MILESTONE}；证据不足不得勾选 tasks.md 的 checkbox（${K_TICK_ONLY}）。`,
     K_FAIL_LOUD,
   ].join('\n'),
-  { label: 'verify', phase: 'Verify', model: 'haiku', schema: VERIFY_SCHEMA }
+  { label: 'verify', phase: 'Verify', model: MODEL_VERIFY, schema: VERIFY_SCHEMA }
 )
 
 return {

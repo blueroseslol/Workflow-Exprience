@@ -16,6 +16,10 @@
  *   - 跨轮次游标：workflow 是后台任务，Stop 触发时文件可能还没落盘，要等几轮
  *   - 任何异常都静默 exit 0 —— hook 绝不能阻断用户的会话
  *
+ * v0.4.5（上下文恢复）：
+ *   - 从 workflowProgress/logs 精确识别 Prompt too long / compaction empty 等上下文错误
+ *   - 把 contextFailure 与恢复建议写入 index/progress；仅明确 Haiku 上下文失败时续起主会话一次
+ *
  * v0.4.3（拍板语义）：
  *   - 游标从 runId 去重改为 runId→四字段指纹（status+result.status+agentCount+totalTokens）：
  *     原生 resume 原地覆写同一 wf_*.json 后指纹必变 → 终态重收（根因 RC3）
@@ -49,8 +53,9 @@ function main() {
     return
   }
 
-  // 递归防护：必须是第一件事
-  if (hookInput.stop_hook_active || hookInput.stopHookActive) return
+  // 递归防护状态必须最先读取。被本 hook 续起后的 Stop 仍允许 harvest，
+  // 但绝不再次 decision:block，避免无限恢复循环。
+  const stopHookActive = !!(hookInput.stop_hook_active || hookInput.stopHookActive)
 
   const sessionId = hookInput.session_id || hookInput.sessionId
   const cwd = hookInput.cwd || process.cwd()
@@ -86,6 +91,7 @@ function main() {
   backfillStates(cwd)
 
   let harvested = 0
+  const recoveryCandidates = []
 
   for (const f of files) {
     const runId = f.replace(/\.json$/, '')
@@ -117,7 +123,7 @@ function main() {
       fs.copyFileSync(path.join(runsDir, f), path.join(rawDir, rawFile))
       // raw 是不可变历史；state 是最新可恢复 Plan/Review checkpoint。当前 run 在 Stop 时刻
       // 直接建立可信 fingerprint；与历史 backfill 的 legacyUnverified 明确区分。
-      // buildStateFromRun 内部对 cacheVersion<1 强制 legacyUnverified(live 通道同规则)。
+      // buildStateFromRun 内部对 cacheVersion<2 强制 legacyUnverified（live 通道同规则）。
       const built = buildStateFromRun({ run, cwd, sessionId })
       if (built?.skipped) {
         warnOnce(cursor, indexPath, `state-build-skipped:${runId}:${built.skipped}`, {
@@ -128,6 +134,9 @@ function main() {
         })
       }
 
+      const contextFailure = classifyContextFailure(run)
+      const modelFallback = summarizeModelFallback(run)
+      const contextRecoveryRecommended = needsContextRecovery(run, contextFailure, modelFallback)
       const entry = {
         runId: run.runId || runId,
         ts: run.timestamp || null,
@@ -142,6 +151,9 @@ function main() {
         phases: Array.isArray(run.phases)
           ? run.phases.map(p => ({ title: p.title, model: p.model ?? null }))
           : null,
+        contextFailure,
+        modelFallback,
+        contextRecoveryRecommended,
         scriptSha1: run.script ? sha1(run.script) : null,
         scriptPath: run.scriptPath || null,
       }
@@ -149,6 +161,8 @@ function main() {
 
       // 需求 8 写入侧：同一次 hook 调用顺带写进度，省一次 hook
       appendProgress(progressDir, sessionId, entry)
+
+      if (!stopHookActive && contextRecoveryRecommended) recoveryCandidates.push(entry)
 
       cursor.fps[runId] = fpNow
       done.add(runId)
@@ -177,6 +191,13 @@ function main() {
   const kept = new Set(cursor.done)
   for (const k of Object.keys(cursor.fps)) if (!kept.has(k)) delete cursor.fps[k]
   writeJson(cursorPath, cursor)
+
+  if (!stopHookActive && recoveryCandidates.length) {
+    process.stdout.write(JSON.stringify({
+      decision: 'block',
+      reason: buildContextRecoveryReason(recoveryCandidates.slice(0, 3)),
+    }))
+  }
 }
 
 // 四字段终态指纹:任何一项变化都代表 run 进入了新终态。
@@ -187,6 +208,128 @@ function runFingerprint(run) {
     String(run?.agentCount ?? ''),
     String(run?.totalTokens ?? ''),
   ].join('|'))
+}
+
+function contextFailureSignature(value) {
+  const text = String(value ?? '')
+  if (/summarization produced empty response/i.test(text)) return 'compaction-empty-response'
+  if (/automatic compaction failed/i.test(text)) return 'automatic-compaction-failed'
+  if (/prompt is too long/i.test(text)) return 'prompt-too-long'
+  if (/maximum context length/i.test(text)) return 'maximum-context-length'
+  if (/context(?: window| length).*(?:exceed|too long|limit)/i.test(text)) return 'context-window-exceeded'
+  if (/too many (?:input )?tokens/i.test(text)) return 'too-many-input-tokens'
+  return null
+}
+
+function isHaikuLane(model) {
+  const id = String(model ?? '').toLowerCase()
+  return id === 'haiku' || id.includes('haiku') || id.includes('luna')
+}
+
+/**
+ * Workflow DSL 中 agent() 失败只给脚本 null；终态 run 的 workflowProgress/error 才有原始错误。
+ * 这里做事后精确分类，不把普通 null、超时、鉴权或 schema 失败误报成上下文超限。
+ */
+function classifyContextFailure(run) {
+  const progress = Array.isArray(run?.workflowProgress) ? run.workflowProgress : []
+  const details = []
+  const seen = new Set()
+
+  function add({ label = null, phase = null, model = null, value }) {
+    const signature = contextFailureSignature(value)
+    if (!signature) return
+    const key = `${label ?? '-'}|${phase ?? '-'}|${model ?? '-'}|${signature}`
+    if (seen.has(key)) return
+    seen.add(key)
+    details.push({ label, phase, model, signature, haikuLane: isHaikuLane(model) })
+  }
+
+  for (const item of progress) {
+    if (item?.type !== 'workflow_agent') continue
+    add({ label: item.label ?? null, phase: item.phaseTitle ?? null, model: item.model ?? null, value: item.error })
+  }
+
+  for (const row of Array.isArray(run?.logs) ? run.logs : []) {
+    const text = String(row ?? '')
+    const label = text.match(/^\[([^\]]+)\]/)?.[1] ?? null
+    const matched = label
+      ? progress.find(item => item?.type === 'workflow_agent' && item.label === label)
+      : null
+    add({
+      label,
+      phase: matched?.phaseTitle ?? null,
+      model: matched?.model ?? null,
+      value: text,
+    })
+  }
+
+  add({ value: run?.error })
+  if (!details.length) return null
+
+  const signatures = [...new Set(details.map(item => item.signature))]
+  const haikuLane = details.some(item => item.haikuLane)
+  return {
+    detected: true,
+    kind: 'context-window-or-compaction',
+    signatures,
+    haikuLane,
+    recommendedFallbackModel: haikuLane ? 'sonnet' : null,
+    agents: details,
+  }
+}
+
+function summarizeModelFallback(run) {
+  const logs = (Array.isArray(run?.logs) ? run.logs : []).map(row => String(row ?? ''))
+  const attempts = logs.filter(row => row.includes('[model-fallback] event=attempt')).length
+  const recovered = logs.filter(row => row.includes('[model-fallback] event=result') && row.includes('outcome=recovered')).length
+  const failed = logs.filter(row => row.includes('[model-fallback] event=result') && row.includes('outcome=failed')).length
+  if (!attempts && !recovered && !failed) return null
+  return { attempted: attempts, recovered, failed, fallbackModel: 'sonnet' }
+}
+
+function needsContextRecovery(run, contextFailure, modelFallback) {
+  if (!contextFailure?.haikuLane || modelFallback?.recovered > 0) return false
+  const runtimeStatus = String(run?.status ?? '').toLowerCase()
+  const resultStatus = String(run?.result?.status ?? '').toLowerCase()
+  if (run?.result == null) return true
+  if (['killed', 'failed', 'error'].includes(runtimeStatus)) return true
+  return ['failed', 'red', 'error', 'commit-failed', 'unknown'].includes(resultStatus)
+}
+
+function phaseModelArg(phase) {
+  const key = String(phase ?? '').toLowerCase()
+  if (key === 'recon') return 'reconModel'
+  if (key === 'plan') return 'planModel'
+  if (key === 'review') return 'reviewModel'
+  if (key === 'specsync') return 'specSyncModel'
+  if (key === 'preflight') return 'preflightModel'
+  if (key === 'implement') return 'implementModel'
+  if (key === 'verify') return 'verifyModel'
+  if (key === 'audit') return 'reviewModel'
+  if (key === 'commit') return 'commitModel'
+  return `${key || 'failedPhase'}Model`
+}
+
+function buildContextRecoveryReason(entries) {
+  const runs = entries.map(entry => {
+    const agents = (entry.contextFailure?.agents ?? []).filter(item => item.haikuLane)
+    const phases = [...new Set(agents.map(item => item.phase).filter(Boolean))]
+    const labels = agents.map(item => item.label).filter(Boolean)
+    const overrides = [...new Set(phases.map(phaseModelArg))].map(key => `${key}: "sonnet"`)
+    return [
+      `runId=${entry.runId}`,
+      `scriptPath=${entry.scriptPath || '-'}`,
+      `phases=${phases.join(',') || '-'}`,
+      `labels=${labels.join(',') || '-'}`,
+      `nextArgs={${overrides.join(', ')}}`,
+    ].join(' ')
+  })
+  return [
+    '[workflow-experience context recovery] 检测到终态日志明确包含 Haiku 上下文窗口/自动压缩失败。',
+    ...runs,
+    '继续当前用户任务，不要只报告错误：优先使用原 scriptPath + resumeFromRunId，并在原 args 上合并上面的 phase model override，把失败阶段切到 sonnet。',
+    '恢复前检查 git status/diff、测试状态和最近提交；前一次代理可能已产生部分副作用，不得重复修改或重复提交。只自动恢复这一轮；若 Sonnet 仍失败，如实停止并报告。',
+  ].join('\n')
 }
 
 // rawDir 中某 runId 的最新版本文件名(wf_x.json 为 rev 1,.r2/.r3 依次)。
@@ -248,7 +391,12 @@ function appendProgress(progressDir, sessionId, entry) {
       status: entry.status,
       resultStatus: entry.resultStatus ?? null,
       agentCount: entry.agentCount,
-      summary: `${entry.workflowName || 'workflow'} → ${entry.status}${entry.resultStatus ? `(${entry.resultStatus})` : ''}（${entry.agentCount ?? '?'} agents）`,
+      contextFailure: entry.contextFailure ?? null,
+      modelFallback: entry.modelFallback ?? null,
+      contextRecoveryRecommended: entry.contextRecoveryRecommended === true,
+      summary: `${entry.workflowName || 'workflow'} → ${entry.status}${entry.resultStatus ? `(${entry.resultStatus})` : ''}（${entry.agentCount ?? '?'} agents）` +
+        `${entry.contextFailure?.haikuLane ? ' · Haiku 上下文失败' : ''}` +
+        `${entry.modelFallback?.recovered ? ` · Sonnet 恢复 ${entry.modelFallback.recovered}` : ''}`,
     }
     fs.appendFileSync(path.join(progressDir, `${sessionId}.jsonl`), JSON.stringify(line) + '\n', 'utf8')
   } catch {
@@ -296,9 +444,21 @@ function writeJson(p, v) {
 const sha1 = s => crypto.createHash('sha1').update(s).digest('hex')
 const sha256 = s => crypto.createHash('sha256').update(s).digest('hex')
 
-try {
-  main()
-} catch {
-  /* hook 绝不阻断会话 */
+module.exports = {
+  buildContextRecoveryReason,
+  classifyContextFailure,
+  contextFailureSignature,
+  isHaikuLane,
+  needsContextRecovery,
+  phaseModelArg,
+  summarizeModelFallback,
 }
-process.exit(0)
+
+if (require.main === module) {
+  try {
+    main()
+  } catch {
+    /* hook 绝不阻断会话 */
+  }
+  process.exit(0)
+}

@@ -1,6 +1,6 @@
 {
   "name": "workflow-experience",
-  "version": "0.4.4",
-  "description": "Ultracode workflow 经验库：OpenSpec-first 增量规划 + GitNexus 动态路由 + 持久 Plan/Review 语义缓存（v0.4.4：保留 harvest checkpoint 写入，移除默认 SessionStart peer-progress 注入，仅按用户原始需求执行显式定向 handoff）",
+  "version": "0.4.5",
+  "description": "Ultracode workflow 经验库：OpenSpec-first 增量规划 + GitNexus 动态路由 + 持久 Plan/Review 语义缓存（v0.4.5：精确识别 Haiku 上下文/压缩失败并续起 Sonnet 恢复）",
   "author": { "name": "loujiajie" }
 }

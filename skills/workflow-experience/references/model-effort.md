@@ -16,20 +16,40 @@
 
 ## 二、本机别名映射（重要）
 
-`~/.claude/settings.json` 的 env 段把模型别名指向了第三方模型：
+模型映射分两层，且会随 CC Switch provider 改变。2026-09-04 本机观测快照为：
 
-| 别名 | 实际模型 |
-|---|---|
-| `opus` | `claude-opus-5[1m]` |
-| `sonnet` | `kimi-k3[1m]` |
-| `haiku` | `deepseek-v4-flash[1m]` |
-| `fable` | `gpt-5.6-sol[1m]` |
+| 逻辑别名 | Claude Code 可见模型 | CC Switch 上游模型 |
+|---|---|---|
+| `opus` | `claude-opus-4-8[1M]` | `gpt-5.6-sol[1M]` |
+| `sonnet` | `claude-sonnet-4-6[1M]` | `gpt-5.6-sol[1M]` |
+| `haiku` | `claude-haiku-4-5` | `gpt-5.6-luna` |
+| `fable` | `claude-fable-5` | `gpt-5.6-sol[1M]` |
 
 全部经 `ANTHROPIC_BASE_URL=http://127.0.0.1:15721` 代理。
 
-**后果**：任何基于「Anthropic 原生模型行为」的假设（包括下面的 effort 门控）在本机都需要重新验证。写模板时用别名而非全 ID，切换 provider 时才不用改脚本。
+**后果**：任何基于「Anthropic 原生模型行为」的假设（包括上下文窗口与下面的 effort 门控）在本机都需要重新验证。写模板时用别名而非全 ID，切换 provider 时才不用改脚本。该表只是诊断快照，不是配置 source of truth；以当前 Claude settings 与 CC Switch provider 为准。
 
-## 三、effort 门控真相 ⚠️
+## 三、Haiku 上下文失败恢复
+
+Workflow DSL 的 `agent()` 在终端失败时只向脚本返回 `null`，运行中的 wrapper 看不到 `Prompt is too long` 等具体错误。因此 v0.4.5 在终态处理：
+
+1. **精确分类**：Stop/harvest 从 run 的 `workflowProgress[].error`、`logs`、根错误中识别 `Prompt is too long`、`automatic compaction failed`、`summarization produced empty response`、context length 与 input token 超限签名，写入 `contextFailure`。普通 `null`、schema mismatch、鉴权或网络错误不命中。
+2. **一次续起**：只有失败代理属于 Haiku lane 且 run 未成功时，Stop hook 才返回 `decision:block`，把恢复指令送回主会话；终态指纹写入游标，同一失败不会重复触发。
+3. **单阶段 Sonnet**：主会话优先用原 `scriptPath + resumeFromRunId`，在原 args 上合并失败 phase 对应的模型覆盖，而不是把整个 workflow 永久切成 Sonnet。
+4. **副作用纪律**：恢复前先检查工作区、测试、最近提交。尤其 Verify/Commit 不得假定前一次 Haiku 什么都没做；Sonnet 再失败则停止。
+
+成品模板支持的恢复参数：
+
+```js
+args.reconModel
+args.preflightModel
+args.verifyModel
+args.commitModel
+```
+
+该恢复不是 effort capability 降级。普通 `null` 仍不能证明 provider 不支持某个 effort；下面的 effort 阶梯继续只接受明确 capability 错误。
+
+## 四、effort 门控真相 ⚠️
 
 从 CLI 二进制反查到的当前本机行为：
 
@@ -86,7 +106,7 @@ const result = await agent(prompt, {
 
 但本机 `sonnet` 别名指向 `kimi-k3`，写全 ID 等于**换了个模型**，不只是换 effort。权衡清楚再改。
 
-## 四、advisor 的模型选择
+## 五、advisor 的模型选择
 
 ```js
 const ADVISOR_MODEL = args?.advisorModel ?? 'fable'   // 默认 fable，传 'opus' 切换

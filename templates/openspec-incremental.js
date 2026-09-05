@@ -85,6 +85,8 @@ const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet' // 本机 Kimi K3
 const MODEL_STRONG = args?.strongModel ?? 'opus'
 const MODEL_REVIEW = args?.reviewModel ?? 'fable'
 const MODEL_VERIFY = args?.verifyModel ?? 'haiku'
+const MODEL_PREFLIGHT = args?.preflightModel ?? MODEL_VERIFY
+const MODEL_COMMIT = args?.commitModel ?? MODEL_VERIFY
 const MODEL_SPEC_SYNC = args?.specSyncModel ?? MODEL_DEFAULT
 const ALWAYS_REVIEW = args?.alwaysReview ?? true
 const REQUIRE_COMMIT = args?.requireCommit ?? true
@@ -431,7 +433,7 @@ if(plan.openspecEdits.length){
 }
 
 phase('Preflight')
-const pre=await llmAgent(['你是 Preflight。建立修改前测试基线，不改业务代码。',`命令=${plan.testCommands.join(' && ')}`,K_FAIL_LOUD].join('\n'),{label:'preflight',phase:'Preflight',model:MODEL_VERIFY,schema:PREFLIGHT_SCHEMA})
+const pre=await llmAgent(['你是 Preflight。建立修改前测试基线，不改业务代码。',`命令=${plan.testCommands.join(' && ')}`,K_FAIL_LOUD].join('\n'),{label:'preflight',phase:'Preflight',model:MODEL_PREFLIGHT,schema:PREFLIGHT_SCHEMA})
 if(!pre)return checkpointEnvelope({status:'failed',at:'Preflight'})
 if(!pre.ready)return checkpointEnvelope({status:'blocked',at:'Preflight',blockers:pre.blockers})
 
@@ -458,7 +460,7 @@ const commitExpected=REQUIRE_COMMIT&&verify?.status==='green'&&!auditBlocks
 let commitResult=null
 if(commitExpected){
   phase('Commit')
-  commitResult=await llmAgent(['你是 Commit 层。Verify green，必要 Audit 已 accept。',`只允许把这些 task 勾完成：${verify.completedTaskIds.join(', ')||'无'}`,`tasks=${TASKS_DOC}`,'逐条确认当前确实 [ ] 且有 Verify 证据，再改 [x]；列表外绝不勾。',K_GIT_SAFE,'代码与 docs 可分两笔提交；不 push。',K_FAIL_LOUD].join('\n'),{label:'commit',phase:'Commit',model:MODEL_VERIFY,schema:COMMIT_SCHEMA})
+  commitResult=await llmAgent(['你是 Commit 层。Verify green，必要 Audit 已 accept。',`只允许把这些 task 勾完成：${verify.completedTaskIds.join(', ')||'无'}`,`tasks=${TASKS_DOC}`,'逐条确认当前确实 [ ] 且有 Verify 证据，再改 [x]；列表外绝不勾。',K_GIT_SAFE,'代码与 docs 可分两笔提交；不 push。',K_FAIL_LOUD].join('\n'),{label:'commit',phase:'Commit',model:MODEL_COMMIT,schema:COMMIT_SCHEMA})
 }
 const commitSucceeded=commitResult?.committed===true&&(commitResult?.commits?.length??0)>0
 const finalStatus=audit?.verdict==='needs-rework'?'needs-rework':audit?.verdict==='escalate-to-human'?'escalate-to-human':commitExpected&&!commitSucceeded?'commit-failed':verify?.status??'unknown'

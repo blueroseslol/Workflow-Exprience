@@ -20,6 +20,8 @@ function llmAgent(prompt, opts = {}) {
 
 const REPO = args?.repo ?? '<D:/path/to/repo>'
 const GITNEXUS_REPO = args?.gitnexusRepo ?? '<indexed-repo-name>'
+const MODEL_RECON = args?.reconModel ?? 'sonnet'
+const MODEL_SYNTHESIZE = args?.synthesizeModel ?? 'opus'
 
 const RECON_SCHEMA = {
   type: 'object',
@@ -102,7 +104,7 @@ const recon = (
       llmAgent(a.prompt + HARD_RULES, {
         label: a.label,
         phase: 'Recon',
-        model: 'sonnet',
+        model: MODEL_RECON,
         effort: 'xhigh',
         schema: RECON_SCHEMA,
       })
@@ -138,7 +140,7 @@ const synthesis = await llmAgent(
     '4. 如果调研之间有矛盾，指出来，不要和稀泥。',
     '5. 最后给出建议的下一步（可执行，指向具体文件或命令）。',
   ].join('\n'),
-  { label: 'synthesize', phase: 'Synthesize', model: 'opus', effort: 'high' }
+  { label: 'synthesize', phase: 'Synthesize', model: MODEL_SYNTHESIZE, effort: 'high' }
 )
 
 return { synthesis, reconCount: recon.length, angles: ANGLES.map(a => a.key) }

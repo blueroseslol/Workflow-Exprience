@@ -127,7 +127,7 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 
 | 闸门 | 位置 | 行为 |
 |---|---|---|
-| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required` 并带 `nextArgs.minRoute=<更高等级>`。主 agent **同 session 直接 resume**（`resumeFromRunId` + 首轮 args 全量叠加 nextArgs）：Recon 命中缓存，minRoute 给路由兜底使**升级粘滞、不会在 Recon 处回落**（否则 Recon 重判 LOW → Plan 再判 HIGH → 死循环）；缓存失效两条腿——跨档（LOW/MEDIUM↔HIGH/CRITICAL）时 plannerModel 变（model 进缓存键），同档（LOW→MEDIUM、HIGH→CRITICAL）时靠 Plan prompt 内嵌的 route 等级变化（prompt 进缓存键），任一都使 Plan 及之后重跑。已跨 session 才开新 workflow（checkpoint）。不在当前 run 中途换模型（保 resume/cache 确定性） |
+| **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required` 并带 `nextArgs.minRoute=<更高等级>`。主 agent **同 session 直接 resume**（`resumeFromRunId` + 首轮 args 全量叠加 nextArgs）：Recon 命中缓存，minRoute 给路由兜底使**升级粘滞、不会在 Recon 处回落**（否则 Recon 重判 LOW → Plan 再判 HIGH → 死循环）；缓存失效两条腿——跨档（LOW/MEDIUM↔HIGH/CRITICAL）时 plannerModel 变（model 进缓存键），同档（LOW→MEDIUM、HIGH→CRITICAL）时靠 Plan prompt 内嵌的 route 等级变化（prompt 进缓存键），任一都使 Plan 及之后重跑。已跨 session 才开新 workflow（checkpoint）。不因风险评分在当前 run 中途换模型；终态 Haiku 上下文故障由 Stop/harvest 精确分类后续起一次 Sonnet 恢复，不改变冻结 route。 |
 | **Review 门** | Review 后 | `revise` → 早退 `replan-required`（实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的过窄问题）；`block` → `blocked` |
 | **Preflight 门** | Preflight 后 | **fail-closed**：`!pre`（agent 未返回）也算失败 → `failed`；`!pre.ready` → `blocked`。不再静默放行 |
 | **Implement 门** | Implement 后 | `!impl \|\| !impl.done` → 早退 `escalate`，避免「没实现完但旧测试全绿被提交」 |
@@ -247,7 +247,8 @@ routing: {
 1. **评分是 JS 纯函数** —— 不消耗 agent、不进缓存键、结果确定。
 2. **route 一次冻结** —— Recon 之后算一次，本轮不变。不在实现中途因 LLM 主观判断从 sonnet 切 opus。
 3. **确定性输入** —— 同 Recon facts + 同阈值 + 同 args = 同 route。路由逻辑禁 `Date.now()` / `Math.random()`。
-4. **需要升级时**：绝不在同一 run 里换模型（破缓存确定性），早退 `route-escalation-required` 交回控制权。续跑**同 session 首选 resume**（`resumeFromRunId` + 首轮 args 全量叠加 `nextArgs`：Recon 命中缓存、仅升级段重跑）；已跨 session 才开新 workflow 抄结论进 `COMMON`（checkpoint）。分流细则见 `resume-and-args.md`「两级暂停」与 ADR-005。
+4. **风险路由需要升级时**：不在同一 run 里换模型（破缓存确定性），早退 `route-escalation-required` 交回控制权。续跑**同 session 首选 resume**（`resumeFromRunId` + 首轮 args 全量叠加 `nextArgs`：Recon 命中缓存、仅升级段重跑）；已跨 session 才开新 workflow 抄结论进 `COMMON`（checkpoint）。分流细则见 `resume-and-args.md`「两级暂停」与 ADR-005。
+5. **终端故障恢复例外**：运行中的普通 `null` 不换模型。终态日志明确命中 Haiku context/compaction 错误且 run 未成功时，Stop/harvest 才用 `decision:block` 续起主会话一次，并要求原 `scriptPath + resumeFromRunId`、失败 phase 的模型 override=`sonnet`。它不重新评分、不改变 route；Sonnet 必须先核对已有副作用。
 
 > ⚠️ 注意「粘滞 miss」：route 决定 plannerModel，一旦某次运行 route 变了（例如改了阈值 args），Plan 及其后所有 agent 因缓存键变化全部重跑。这是预期行为——阈值调参属于"换一套实验"，本就该全量重跑。
 

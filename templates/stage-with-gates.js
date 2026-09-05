@@ -53,7 +53,11 @@ const COMMON = {
 // 运行期注入：主 agent 在得到用户答复后带进来
 const DECISIONS = args?.decisions ?? {}
 const TS = args?.ts ?? 'unknown-ts'
-const ADVISOR_MODEL = args?.advisorModel ?? 'fable'
+const MODEL_PLAN = args?.planModel ?? 'opus'
+const MODEL_REVIEW = args?.reviewModel ?? 'fable'
+const MODEL_IMPLEMENT = args?.implementModel ?? 'sonnet'
+const MODEL_VERIFY = args?.verifyModel ?? 'haiku'
+const ADVISOR_MODEL = args?.advisorModel ?? MODEL_REVIEW
 
 const S_STR_ARR = { type: 'array', items: { type: 'string' } }
 
@@ -137,7 +141,7 @@ const plan = await llmAgent(
     '- 凡是需要用户在两个合理方案之间做选择的，写进 decisionPoints，不要自己拍。',
     '- 已在「已拍板」列表里的，绝不能再进 decisionPoints。',
   ].join('\n'),
-  { label: 'plan', phase: 'Plan', model: 'opus', effort: 'high', schema: PLAN_SCHEMA }
+  { label: 'plan', phase: 'Plan', model: MODEL_PLAN, effort: 'high', schema: PLAN_SCHEMA }
 )
 
 if (!plan) return { status: 'failed', at: 'Plan', milestone: COMMON.milestone }
@@ -206,7 +210,7 @@ const impl = await llmAgent(
   {
     label: 'implement',
     phase: 'Implement',
-    model: 'sonnet',
+    model: MODEL_IMPLEMENT,
     effort: 'xhigh',
     schema: {
       type: 'object',
@@ -234,7 +238,7 @@ const verify = await llmAgent(
     `只允许勾选 ${COMMON.tickAllowed.join('、')}，且每个勾选都要在 ticked 里附上证据（测试输出或退出码）。`,
     '没有证据就不要勾。如实报告，测试失败就写 red 并附原始输出。',
   ].join('\n'),
-  { label: 'verify', phase: 'Verify', model: 'haiku', schema: VERIFY_SCHEMA }
+  { label: 'verify', phase: 'Verify', model: MODEL_VERIFY, schema: VERIFY_SCHEMA }
 )
 
 return {

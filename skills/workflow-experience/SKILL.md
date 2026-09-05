@@ -80,6 +80,8 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 
 **Haiku 类模型 effort 规则**：首试 `max`，明确不支持才 `max→xhigh→high` 重试；`null`/超时/鉴权错误不得误判为不支持。详见 `references/model-effort.md`。
 
+**Haiku 上下文恢复 v0.4.5**：运行中的 `agent() === null` 原因不透明，不得盲目换模型。Stop/harvest 从终态 `workflowProgress/logs` 命中明确上下文/自动压缩签名，且失败代理属于 Haiku lane、run 未成功时，才用 `decision:block` 续起主会话一次。恢复必须优先原 `scriptPath + resumeFromRunId`，在原 args 上仅把失败 phase 对应的 `reconModel/preflightModel/verifyModel/commitModel` 改为 `sonnet`；先检查工作区/测试/提交，禁止重复副作用。同一终态指纹只恢复一次，Sonnet 再失败则如实停止。详见 `references/model-effort.md`。
+
 **动态路由**见 `references/dynamic-routing.md`。**Codex 覆盖默认关闭**：Review/Audit 仍是 `fable`；只有用户明确要求时，authoring 阶段才按 `references/codex-cli.md` 改写本次 workflow。
 
 ## OpenSpec-first 三条成本红线
@@ -108,7 +110,7 @@ OpenSpec-first 若实现阶段发现 **Plan 本身**失效，优先分类 mechan
 
 OpenSpec 项目中，OpenSpec artifact 是第一 planning source of truth；harvest 的 LLM result 是辅助证据。若两者冲突，必须重新验证 workspace/drift，不得凭历史摘要覆盖 Git 中已更新的 artifact。
 
-**消息边界 v0.4.4（硬门）**：顶层 Workflow DSL 没有 `SendMessage` / `ListAgents` primitive，但 `agent()` 启动的子代理可能从其工具面获得二者；只写 prompt 禁令不足。所有成品模板与新写 workflow 的每次 LLM 调用都必须经过统一 wrapper，在 `opts.disallowedTools` 中合并 `SendMessage`、`ListAgents`，保留原有项（如 Advisor 的 `Edit` / `Write`），其余 opts 原样透传；禁止绕过 wrapper 直接调用 `agent()`。
+**统一 wrapper 硬门（v0.4.5）**：顶层 Workflow DSL 没有 `SendMessage` / `ListAgents` primitive，但 `agent()` 启动的子代理可能从其工具面获得二者；只写 prompt 禁令不足。所有成品模板与新写 workflow 的每次 LLM 调用都必须经过统一 wrapper，在 `opts.disallowedTools` 中合并 `SendMessage`、`ListAgents` 并保留调用点已有项；其余 opts 原样透传，禁止绕过 wrapper 直接调用 `agent()`。上下文恢复由 Stop/harvest 的精确分类处理，不在 wrapper 中把普通 `null` 当作上下文错误。
 
 只有当前用户原始需求明确要求“完成后通知主会话 / 回传其他会话 / 同步协调会话”等，才保留即时 handoff 契约；不得从 checkpoint、旧 handoff、并行会话存在或 agent 摘要推断。workflow 内只返回 `broadcast` + 结构化结果；到达 **terminal result** 后，外层 Claude Code 主会话才可解析目标并定向调用 `ListAgents` / `SendMessage`。不新增 LLM handoff phase，不改 BasePlan prompt；投递失败不得宣称成功，仍以 `.claude/progress/*.jsonl` + harvest 为 checkpoint。详见 `references/peer-handoff.md`。
 
