@@ -27,6 +27,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-state-pipeline-'))
 const cwd = tmp
 process.env.ULTRACODE_PROJECTS_DIR = path.join(tmp, 'projects')
 
+try {
+
 // ---------- 脚手架 ----------
 const changeDir = path.join(cwd, 'openspec/changes/test-change')
 fs.mkdirSync(changeDir, { recursive: true })
@@ -44,14 +46,26 @@ function makePlan() {
     whitelist: ['src/a.ts'], mustNotTouch: [], evidenceDependencies: [],
   }
 }
+let runSequence = 0
 function makeRun(id, over = {}) {
   return {
-    runId: id, timestamp: new Date().toISOString(), script: scriptV4, scriptPath: path.join(cwd, 'wf.js'),
+    runId: id,
+    timestamp: new Date(Date.UTC(2026, 8, 5, 0, 0, runSequence++)).toISOString(),
+    script: scriptV4, scriptPath: path.join(cwd, 'wf.js'),
     status: 'completed', agentCount: 2, totalTokens: 1000,
     args: { task: `任务${id}`, milestone: 'M1', changeDir: 'openspec/changes/test-change', repo: cwd },
     result: {
       status: 'green',
-      checkpoint: { key: `openspec/changes/test-change::M1`, cacheVersion: 1, changeDir: 'openspec/changes/test-change', milestone: 'M1', task: `任务${id}` },
+      checkpoint: {
+        key: `openspec/changes/test-change::M1`,
+        kind: 'gitnexus-routed-v2',
+        schemaVersion: 2,
+        cacheVersion: 2,
+        changeDir: 'openspec/changes/test-change',
+        milestone: 'M1',
+        task: `任务${id}`,
+        projectRoot: cwd,
+      },
       basePlan: makePlan(), effectivePlan: makePlan(),
       review: { verdict: 'approve' }, verify: { status: 'green' },
       ...(over.result || {}),
@@ -68,8 +82,8 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } cat
 // ---------- a) 新契约 raw → 可信档 ----------
 {
   const built = lib.buildStateFromRun({ run: makeRun('wf_a'), cwd, sessionId: 'sess-a' })
-  ok(!!built.state && built.state.legacyUnverified === false && built.state.cacheVersion === 1, 'a1 新契约 → 可信档 legacy=false cacheVersion=1')
-  ok(lib.validateState(cwd, built.state).valid === true, 'a2 可信档 validateState valid=true')
+  ok(!!built.state && built.state.legacyUnverified === false && built.state.cacheVersion === 2, 'a1 v2 契约 → 可信档 legacy=false cacheVersion=2', built.skipped)
+  ok(!!built.state && lib.validateState(cwd, built.state).valid === true, 'a2 可信档 validateState valid=true', built.skipped)
 }
 
 // ---------- b) 旧契约(cacheVersion=0)→ legacy 强制 + 防降级双向守卫 ----------
@@ -94,6 +108,17 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } cat
   ok(!!built2.state && built2.state.legacyUnverified === true && built2.state.cacheVersion === 0, 'b2 无 meta → cacheVersion=0 且 legacyUnverified=true(不伪造 1)')
   const v = lib.validateState(cwd, built2.state)
   ok(v.valid === false && v.legacyUnverified === true, 'b3 legacy 档 validateState 恒 invalid(只走 nativeResume/CheckpointValidate)')
+
+  const v1Run = makeRun('wf_b3')
+  v1Run.result.checkpoint = {
+    ...v1Run.result.checkpoint,
+    key: 'openspec/changes/test-change::M-v1',
+    milestone: 'M-v1',
+    cacheVersion: 1,
+  }
+  const built3 = lib.buildStateFromRun({ run: v1Run, cwd, sessionId: 'sess-a' })
+  ok(!!built3.state && built3.state.cacheVersion === 1 && built3.state.legacyUnverified === true,
+    'b4 v1 契约保持 legacy，不能直接可信复用', built3.skipped)
 }
 
 // ---------- c) changeDir 一级子目录探测:唯一命中建档 ----------
@@ -109,7 +134,7 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } cat
   const inferred = lib.inferCheckpoint(nestedRun, cwd)
   ok(inferred.ok === true && /backend[\\/]openspec[\\/]changes[\\/]nested-change/.test(inferred.changeDir || ''), 'c1 一级子目录唯一命中 changeDir')
   const built = lib.buildStateFromRun({ run: nestedRun, cwd, sessionId: 'sess-a' })
-  ok(!!built.state && built.state.changeDir && built.state.changeDir.includes('backend'), 'c2 命中后正常建档')
+  ok(!!built.state && built.state.changeDir && built.state.changeDir.includes('backend'), 'c2 命中后正常建档', built.skipped)
 }
 
 // ---------- d) 多候选 fail-closed 拒建 ----------
@@ -131,9 +156,9 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } cat
   plainRun.args = { task: '纯代码任务E', milestone: 'ME' }
   delete plainRun.result.checkpoint
   const built = lib.buildStateFromRun({ run: plainRun, cwd, sessionId: 'sess-a' })
-  ok(!!built.state && built.state.fingerprint.source.kind === 'none', 'e1 无 openspec 引用 → kind=none 建档')
-  ok(typeof built.state.checkpointKey === 'string' && built.state.checkpointKey.startsWith('nochg:') && !built.state.checkpointKey.startsWith('null::'), 'e2 checkpointKey=nochg:<taskhash>::ME(非 null::)')
-  const v = lib.validateState(cwd, built.state)
+  ok(!!built.state && built.state.fingerprint.source.kind === 'none', 'e1 无 openspec 引用 → kind=none 建档', built.skipped)
+  ok(!!built.state && typeof built.state.checkpointKey === 'string' && built.state.checkpointKey.startsWith('nochg:') && !built.state.checkpointKey.startsWith('null::'), 'e2 checkpointKey=nochg:<taskhash>::ME(非 null::)', built.skipped)
+  const v = built.state ? lib.validateState(cwd, built.state) : { valid: false, sourceValid: false }
   ok(v.valid === false && v.sourceValid === false, 'e3 kind=none validateState sourceValid 恒 false(永不 TRUSTED)')
   // planless run(result 无 plan): :251/:280 门放宽后仍可建档
   const planless = makeRun('wf_e2')
@@ -156,12 +181,37 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } cat
   ok(inferred3.ok === false && inferred3.reason === 'no-slices', 'e6 有 plan 但 slices 非数组 → 拒建(no-slices)')
 }
 
+// ---------- g) 相对依赖解析边界 ----------
+{
+  const projectRoot = path.join(cwd, 'dependency-project')
+  const nestedCwd = path.join(projectRoot, 'packages/app')
+  fs.mkdirSync(nestedCwd, { recursive: true })
+  fs.writeFileSync(path.join(projectRoot, 'root-only.ts'), 'root\n')
+  fs.writeFileSync(path.join(nestedCwd, 'cwd-only.ts'), 'cwd\n')
+  fs.writeFileSync(path.join(projectRoot, 'duplicate.ts'), 'root duplicate\n')
+  fs.writeFileSync(path.join(nestedCwd, 'duplicate.ts'), 'cwd duplicate\n')
+  const outside = path.join(cwd, 'outside.ts')
+  fs.writeFileSync(outside, 'outside\n')
+
+  const same = lib.resolveDependency(projectRoot, projectRoot, 'root-only.ts')
+  ok(same.abs === path.join(projectRoot, 'root-only.ts'), 'g1 cwd=projectRoot 时去重且唯一命中')
+  const rootHit = lib.resolveDependency(nestedCwd, projectRoot, 'root-only.ts')
+  ok(rootHit.abs === path.join(projectRoot, 'root-only.ts'), 'g2 cwd 不同时命中 projectRoot')
+  const cwdHit = lib.resolveDependency(nestedCwd, projectRoot, 'cwd-only.ts')
+  ok(cwdHit.abs === path.join(nestedCwd, 'cwd-only.ts'), 'g3 cwd 不同时命中当前 cwd')
+  ok(lib.resolveDependency(nestedCwd, projectRoot, 'duplicate.ts').ambiguous === 'duplicate.ts', 'g4 双命中 fail-closed 为 ambiguous')
+  ok(lib.resolveDependency(nestedCwd, projectRoot, 'missing.ts').missing === 'missing.ts', 'g5 缺失依赖保持 missing')
+  ok(lib.resolveDependency(nestedCwd, projectRoot, outside).unsupported === outside, 'g6 项目外绝对路径保持 unsupported')
+}
+
 // ---------- f) harvest fp 续收:不变跳过 / 变化写 .r2 + index 两行 + state 覆盖 ----------
 {
-  const sess = `sess-f-${process.pid}`
+  const sess = `sess-f-${process.pid}-${path.basename(tmp)}`
   const wfDir = path.join(process.env.ULTRACODE_PROJECTS_DIR, 'projF', sess, 'workflows')
   fs.mkdirSync(wfDir, { recursive: true })
   const runV1 = makeRun('wf_f1')
+  runV1.args.modelEfforts = { opus: 'max', sonnet: 'high' }
+  runV1.args.phaseEfforts = { Review: 'high' }
   runV1.result.status = 'need-decision'
   runV1.result.verify = null
   fs.writeFileSync(path.join(wfDir, 'wf_f1.json'), JSON.stringify(runV1))
@@ -181,6 +231,7 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } cat
   ok(!fs.existsSync(path.join(rawDir, 'wf_f1.r2.json')), 'f4 fp 不变 → 跳过,无伪 .r2')
   // resume 覆写(终态 green,tokens 变)→ 重收写 .r2 + index 追加 + state 覆盖
   const runV2 = makeRun('wf_f1')
+  runV2.args = { phaseEfforts: { Review: 'xhigh', Implement: null } }
   runV2.result.status = 'green'
   runV2.totalTokens = 2500
   runV2.agentCount = 6
@@ -188,11 +239,28 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } cat
   runHarvest()
   ok(fs.existsSync(path.join(rawDir, 'wf_f1.r2.json')) && fs.existsSync(path.join(rawDir, 'wf_f1.json')), 'f5 fp 变化 → 写 wf_f1.r2.json 且首轮保留')
   const indexRows2 = fs.readFileSync(path.join(cwd, 'docs/ultracode/index.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
-  ok(indexRows2.filter(r => r.runId === 'wf_f1').length === 2, 'f6 重收 index 追加为两行(append-only)')
+  const f1Rows = indexRows2.filter(r => r.runId === 'wf_f1' && r.rawFile)
+  ok(f1Rows.length === 2, 'f6 重收 index 追加为两行(append-only)', `actual=${f1Rows.length}; rows=${JSON.stringify(f1Rows)}`)
   const st = readJson(statePathOf('openspec/changes/test-change::M1'))
-  ok(st && st.workflowStatus === 'completed' && st.runId === 'wf_f1', 'f7 state 被 resume 终态覆盖(只留最新)')
+  ok(st && st.workflowStatus === 'green' && st.runId === 'wf_f1', 'f7 state 被 resume 终态覆盖(只留最新)', JSON.stringify(st && { workflowStatus: st.workflowStatus, runId: st.runId, resultStatus: st.resultStatus, sourceRunRevision: st.sourceRunRevision }))
+  ok(st?.resumeArgs?.modelEfforts?.opus === 'max' && st?.resumeArgs?.modelEfforts?.sonnet === 'high'
+    && st?.resumeArgs?.phaseEfforts?.Review === 'xhigh' && st?.resumeArgs?.phaseEfforts?.Implement === null,
+  'f8 resume 的 modelEfforts/phaseEfforts 按 key 合并并保留 null', JSON.stringify(st?.resumeArgs))
   // cursor v2 文件存在
-  ok(fs.readdirSync(os.tmpdir()).some(f => f.startsWith('wfharvest-v2-')), 'f8 游标为 v2 命名')
+  ok(fs.readdirSync(os.tmpdir()).some(f => f.startsWith('wfharvest-v2-')), 'f9 游标为 v2 命名')
+}
+
+// ---------- i) 纯 args merge：普通字段后者优先，嵌套覆盖不丢历史 ----------
+{
+  const merged = lib.mergeResumeArgs(
+    { task: 'old', decisions: { a: 1 }, modelEfforts: { opus: 'max', sonnet: 'high' }, phaseEfforts: { Review: 'high' } },
+    { task: 'new', decisions: { b: 2 }, phaseEfforts: { Review: 'xhigh', Implement: null } },
+  )
+  ok(merged.task === 'new' && merged.decisions.a === 1 && merged.decisions.b === 2,
+    'i1 mergeResumeArgs 普通字段后者优先且 decisions 合并')
+  ok(merged.modelEfforts.opus === 'max' && merged.modelEfforts.sonnet === 'high'
+    && merged.phaseEfforts.Review === 'xhigh' && merged.phaseEfforts.Implement === null,
+  'i2 mergeResumeArgs 保留模型覆盖并应用阶段增量/null')
 }
 
 // ---------- h) LDL_UGC 真实 raw backfill 干跑(只读) ----------
@@ -224,7 +292,9 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } cat
   }
 }
 
-// ---------- 清理 ----------
-fs.rmSync(tmp, { recursive: true, force: true })
+} finally {
+  fs.rmSync(tmp, { recursive: true, force: true })
+}
+
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项失败`)
 process.exit(failures === 0 ? 0 : 1)

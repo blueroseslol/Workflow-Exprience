@@ -1,44 +1,67 @@
-# 模型别名与 effort 本机实测
+# 模型别名与 effort 适配
 
-`workflow-authoring` 已负责通用 `model` / `effort` contract；本文件只记录本机别名映射、语料分工和实测偏差。
+`workflow-authoring` 负责通用 `model` / `effort` contract；本文件记录逻辑别名、可变 provider 映射和插件覆盖语义。
 
-## 一、语料实证的分工
+## 一、逻辑角色
 
-| Phase | 高频 model | 出现次数 | 职责 |
+| Phase | 默认 model | 默认 effort | 职责 |
 |---|---|---|---|
-| Plan | `opus` | 13 | 根因分析 + 开发计划 |
-| Review / Challenge | `fable` | 11 | 审计划、advisor、反驳 |
-| Preflight | `haiku` | 8 | 装依赖、建目录、跑基线 |
-| Implement | `sonnet` | 7 | 读码 + 实现 |
-| Verify | `haiku` | 9 | 跑测试 + commit + GitNexus |
+| Recon | `haiku` | 省略 | 代码/OpenSpec/GitNexus 事实采集 |
+| Plan | `sonnet` / `opus` | `high` | 常规规划 / 架构升级 |
+| Review / Advisor / Audit | `fable` | `high` | 对抗审阅与裁决 |
+| Implement | `sonnet` / `opus` | `xhigh` | 常规实现 / CRITICAL 或不收敛升级 |
+| Preflight / Verify / Commit | `haiku` | 省略 | 基线、测试、证据和提交 |
 
-这是本机经验，不覆盖 `dynamic-routing.md` 的 HIGH/CRITICAL 路由。
+逻辑别名是 workflow 的稳定接口。CC Switch 可以让 `opus` 与 `sonnet` 指向同一个 GPT-5.6 Sol 上游；二者仍保留独立角色、独立用户 effort 覆盖和独立缓存身份。风险升级到 `opus` 代表执行角色与请求参数升级，不能在无路由证据时描述成“已换成更强上游模型”。
 
-## 二、本机别名映射（重要）
+`fable` 可映射 GPT-6 Astra，`haiku` 可映射 GPT-5.6 Terra 或 Luna。映射会随 provider 改变，当前 settings 只是 configured，代理请求日志才是 observed；历史请求不能证明新配置已经生效。
 
-模型映射分两层，且会随 CC Switch provider 改变。2026-09-04 本机观测快照为：
+## 二、用户覆盖契约
 
-| 逻辑别名 | Claude Code 可见模型 | CC Switch 上游模型 |
-|---|---|---|
-| `opus` | `claude-opus-4-8[1M]` | `gpt-5.6-sol[1M]` |
-| `sonnet` | `claude-sonnet-4-6[1M]` | `gpt-5.6-sol[1M]` |
-| `haiku` | `claude-haiku-4-5` | `gpt-5.6-luna` |
-| `fable` | `claude-fable-5` | `gpt-5.6-sol[1M]` |
+自然语言由外层 authoring 代理解释，模板接收结构化 args：
 
-全部经 `ANTHROPIC_BASE_URL=http://127.0.0.1:15721` 代理。
+```js
+args.modelEfforts = { opus: 'max', sonnet: 'high' }
+args.phaseEfforts = { Implement: 'high', Review: 'xhigh', Advisor: 'max' }
+```
 
-**后果**：任何基于「Anthropic 原生模型行为」的假设（包括上下文窗口与下面的 effort 门控）在本机都需要重新验证。写模板时用别名而非全 ID，切换 provider 时才不用改脚本。该表只是诊断快照，不是配置 source of truth；以当前 Claude settings 与 CC Switch provider 为准。
+允许值为 `low`、`medium`、`high`、`xhigh`、`max` 和 `null`。解析顺序：
 
-## 三、Haiku 上下文失败恢复
+1. `phaseEfforts` 中对应阶段或角色；
+2. `modelEfforts` 中最终逻辑模型别名；
+3. 调用点原默认 effort，原来省略的继续省略。
 
-Workflow DSL 的 `agent()` 在终端失败时只向脚本返回 `null`，运行中的 wrapper 看不到 `Prompt is too long` 等具体错误。因此 v0.4.5 在终态处理：
+`null` 表示恢复调用点默认，不会作为字符串传给 provider。未知逻辑别名、未知阶段和非法 effort 在第一次 agent 派发前报错。`Review`、`Advisor`、`Audit` 是三个独立键。
 
-1. **精确分类**：Stop/harvest 从 run 的 `workflowProgress[].error`、`logs`、根错误中识别 `Prompt is too long`、`automatic compaction failed`、`summarization produced empty response`、context length 与 input token 超限签名，写入 `contextFailure`。普通 `null`、schema mismatch、鉴权或网络错误不命中。
-2. **一次续起**：只有失败代理属于 Haiku lane 且 run 未成功时，Stop hook 才返回 `decision:block`，把恢复指令送回主会话；终态指纹写入游标，同一失败不会重复触发。
-3. **单阶段 Sonnet**：主会话优先用原 `scriptPath + resumeFromRunId`，在原 args 上合并失败 phase 对应的模型覆盖，而不是把整个 workflow 永久切成 Sonnet。
-4. **副作用纪律**：恢复前先检查工作区、测试、最近提交。尤其 Verify/Commit 不得假定前一次 Haiku 什么都没做；Sonnet 再失败则停止。
+Opus/Sonnet 即使同指向 Sol，`modelEfforts.opus` 也不能影响 Sonnet。若用户只说“Sol 用 max”而任务中多个别名都指向 Sol，authoring 应结合明确阶段解释；仍有实质歧义时询问用户，不能猜一个别名。
 
-成品模板支持的恢复参数：
+## 三、恢复与缓存
+
+checkpoint 保存 `modelEfforts` 和 `phaseEfforts`。续跑按以下顺序分别按 key 合并，后者优先：
+
+```text
+state.resumeArgs → state.continuationArgs → 本轮新 args
+```
+
+显式 `null` 必须保留。提高 Recon 或 Plan effort 会让对应历史 artifact 失效；提高 Review effort 会改变 Review 输入并强制重审，但未变更的 BasePlan 仍可复用。改变 effort 也可能导致原生 agent cache miss，具体范围以 runtime 实测为准。
+
+wrapper 为每次调用记录逻辑模型、phase、role、`requestedEffort` 和来源。`requestedEffort` 只表示传给 Workflow runtime 的值；除非本次链路有反代日志证据，否则 `actualModel` 与 `effectiveEffort` 必须写 `unknown`。
+
+## 四、兼容与失败边界
+
+本机 Claude Code 2.1.260 的 `--help` 列出 `low/medium/high/xhigh/max`。这证明客户端接口接受这些枚举，不证明每个逻辑别名、provider 或上游模型都实际执行该强度。
+
+不得通过替换成虚构模型 ID、改 Claude 全局配置或改 cc-switch 数据库来绕过能力判断。只有 runtime/provider 明确返回 effort/reasoning capability 不支持错误时，才能按用户已授权策略改变 effort；`agent() === null`、超时、schema、鉴权、限流、网络和普通 4xx/5xx 都不是能力证据。
+
+严格验证仍依赖 schema、file:line、命令退出码、测试计数与原始输出。effort 不是唯一质量门。
+
+## 五、Haiku 上下文失败恢复（兼容保留）
+
+Workflow DSL 的 `agent()` 在终端失败时只向脚本返回 `null`。Stop/harvest 从终态 `workflowProgress[].error`、logs 和根错误精确识别 `Prompt is too long`、自动压缩失败、空摘要、context length 与 input token 超限签名。
+
+只有失败代理属于现有 Haiku lane 且 run 未成功时，才 `decision:block` 一次，并建议用原 `scriptPath + resumeFromRunId` 把失败 phase 临时切到 `sonnet`。恢复前检查工作区、测试和最近提交，避免重复副作用。普通 `null` 不触发自动恢复。本轮不新增 Terra 特判或大上下文压力测试。
+
+支持的模型恢复参数为：
 
 ```js
 args.reconModel
@@ -47,75 +70,12 @@ args.verifyModel
 args.commitModel
 ```
 
-该恢复不是 effort capability 降级。普通 `null` 仍不能证明 provider 不支持某个 effort；下面的 effort 阶梯继续只接受明确 capability 错误。
+模型恢复与 effort 覆盖是两条独立机制；恢复时两张 effort map 仍须按 key 合并。
 
-## 四、effort 门控真相 ⚠️
-
-从 CLI 二进制反查到的当前本机行为：
-
-| 组合 | 实际发生的事 |
-|---|---|
-| `haiku` + `effort: 'max'` | **可能为空操作** —— 当前逻辑 `haiku` 路径会直接 return，effort 参数不一定发送给 provider |
-| `sonnet` + `effort: 'xhigh'` | **静默降级为 high** —— denylist 含 sonnet-4-5 / 4-6 |
-| `opus` + `effort: 'high'` | 生效 |
-| `fable` + `effort: 'high'` | 生效（fable 的 capabilities 含 effort） |
-
-当前 `haiku + max` 路径可能**无报错、无警告**：如果 CLI 在本机先把 effort 吞掉，provider 根本看不到这个参数，因此也不会触发下面的兼容重试。这和“provider 明确返回不支持某个 effort 等级”是两种情况，不能混为一谈。
-
-语料佐证：46 个脚本里 `haiku + max` 出现 **0 次** —— 历史实践从未依赖它。
-
-### Haiku 类型模型的 effort 兼容阶梯
-
-当 `haiku` 别名被映射到第三方快速模型（例如 GLM-5.3-Flash），且本次 workflow **明确需要传 effort** 时，authoring / runner 按以下顺序尝试：
-
-```text
-max → xhigh → high
-```
-
-规则必须 fail-closed：
-
-1. 首次使用 `max`。
-2. **仅当 runtime / provider 明确返回“不支持该 effort / reasoning level / thinking capability”类错误**时，才改为 `xhigh` 重试。
-3. `xhigh` 仍得到同类 capability 错误，再改为 `high`。
-4. `high` 仍不支持时，**停止自动降级并提示用户**；让用户选择“省略 effort，使用该模型默认思考策略”或“换用支持 effort 的模型”。不得静默省略 effort，也不得擅自换模型。
-5. `agent() === null`、超时、schema 不匹配、鉴权失败、限流、网络错误、普通 4xx/5xx **都不是** effort capability 证据，不得因此走这条降级链。
-
-推荐在需要显式 effort 的模板里把它做成 args，而不是把某一级写死：
+## 六、Advisor 模型
 
 ```js
-const HAIKU_EFFORT = args?.haikuEffort ?? 'max'
-
-const result = await agent(prompt, {
-  model: 'haiku',
-  effort: HAIKU_EFFORT,
-  schema: SOME_SCHEMA,
-})
+const ADVISOR_MODEL = args?.advisorModel ?? 'fable'
 ```
 
-若收到明确的 effort capability 错误，主 agent 保持其他 args 不变，只把 `haikuEffort` 依次改为 `xhigh`、`high` 后重跑；能同 session resume 时优先复用原 run。`effort` 进入 agent cache key，因此改变它会让该 Haiku agent 及其后续链路 cache miss，这是预期行为。
-
-### 那「让 haiku 验得更严」怎么实现？
-
-不要把 effort 当成唯一质量门。即使某个 provider 接受 `max/xhigh/high`，仍应使用本机取证型 schema：二元 verdict、退出码、测试计数、原始输出尾部、Preflight 基线对比。实例集中在 `schemas.md`，这里不重复 Workflow 的通用 schema contract。
-
-### 如果确实需要 sonnet 的 xhigh
-
-两条路：
-- 在 `agent()` 里写全模型 ID（如 `claude-sonnet-5`）绕开别名 denylist；
-- 或设 `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5`。
-
-但本机 `sonnet` 别名指向 `kimi-k3`，写全 ID 等于**换了个模型**，不只是换 effort。权衡清楚再改。
-
-## 五、advisor 的模型选择
-
-```js
-const ADVISOR_MODEL = args?.advisorModel ?? 'fable'   // 默认 fable，传 'opus' 切换
-```
-
-**fable 作默认的理由**：advisor 的职责是反驳而非附和，需要的是不同的视角，而不是更强的算力。用与主链相同的模型做 advisor，容易得到同质化的认可。
-
-**什么时候切 opus**：涉及架构决策、跨模块影响分析、或 fable 连续两次给出模糊裁决时。
-
-⚠️ **advisor agent 必须放调用链尾部或拆成独立 workflow** —— `model` 进缓存键，切换 `advisorModel` 会让该 agent **及其后所有 agent** 重跑。
-
-通用 effort 取值与继承规则直接查 `workflow-authoring`；本文件只维护上述本机异常与第三方 Haiku 兼容策略。
+Advisor 的价值来自独立复核代码和证据，不能仅凭别名不同宣称具有独立模型视角。涉及架构决策、跨模块影响，或顾问连续给出模糊裁决时，仍可按原路由切换 `opus`。改变 Advisor 模型或 effort 会使该调用及必要下游缓存失效。

@@ -33,7 +33,7 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const crypto = require('crypto')
-const { buildStateFromRun, backfillStates } = require('./checkpoint-lib.cjs')
+const { buildStateFromRun, backfillStates, rawRevisionFromFile } = require('./checkpoint-lib.cjs')
 
 const MAX_SCAN = 200 // 单次最多处理的 wf 文件数，防御性上限
 const MAX_CURSOR = 500 // done/fps 游标上限，fps 与 done 同步淘汰
@@ -124,7 +124,12 @@ function main() {
       // raw 是不可变历史；state 是最新可恢复 Plan/Review checkpoint。当前 run 在 Stop 时刻
       // 直接建立可信 fingerprint；与历史 backfill 的 legacyUnverified 明确区分。
       // buildStateFromRun 内部对 cacheVersion<2 强制 legacyUnverified（live 通道同规则）。
-      const built = buildStateFromRun({ run, cwd, sessionId })
+      const built = buildStateFromRun({
+        run,
+        cwd,
+        sessionId,
+        rawRevision: rawRevisionFromFile(rawFile),
+      })
       if (built?.skipped) {
         warnOnce(cursor, indexPath, `state-build-skipped:${runId}:${built.skipped}`, {
           warn: 'state-build-skipped',

@@ -139,7 +139,7 @@ v0.4.1 的 dirty 门控只有"验证全过 → 整体 HIT / 否则 → 全量重
 dirty 候选
   ↓ CheckpointValidate（haiku，输出 changedSliceIds / requiresArchitect）
   ├─ planStillValid      → 整体 HIT（不变）
-  ├─ 部分失效且可定位     → 历史 Plan 为起点 + 定向 PlanPatch（requiresArchitect→Opus，否则 Kimi）
+  ├─ 部分失效且可定位     → 历史 Plan 为起点 + 定向 PlanPatch（requiresArchitect→Opus，否则 Sonnet）
   │                        → Review 循环第一轮自动成为 DeltaReview（patchRounds=1，只审 changed slices）
   └─ 全部失效/无法定位     → 回退全量 Planner；patch null/blocked → fail-closed 转人工（可全量重跑）
 ```

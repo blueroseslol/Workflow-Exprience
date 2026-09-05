@@ -22,12 +22,48 @@ export const meta = {
   ],
 }
 
+// effort-policy:start — 模板沙箱禁 import，五个成品模板保持同一份小型纯 JS policy。
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const MODEL_EFFORT_KEYS = ['haiku', 'sonnet', 'opus', 'fable']
+const PHASE_EFFORT_KEYS = ['Plan', 'Review', 'Advisor', 'Implement', 'Verify']
+function normalizeEffortOverrides(raw, kind, allowedKeys) {
+  if (raw == null) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${kind} 必须是对象`)
+  const out = {}
+  for (const [inputKey, value] of Object.entries(raw)) {
+    const key = allowedKeys.find(k => k.toLowerCase() === String(inputKey).toLowerCase())
+    if (!key) throw new Error(`${kind} 包含未知键: ${inputKey}`)
+    if (value !== null && !EFFORT_LEVELS.has(value)) throw new Error(`${kind}.${key} 的 effort 无效: ${value}`)
+    out[key] = value
+  }
+  return out
+}
+const MODEL_EFFORTS = normalizeEffortOverrides(args?.modelEfforts, 'modelEfforts', MODEL_EFFORT_KEYS)
+const PHASE_EFFORTS = normalizeEffortOverrides(args?.phaseEfforts, 'phaseEfforts', PHASE_EFFORT_KEYS)
+function resolveAgentEffortFrom(modelEfforts, phaseEfforts, opts) {
+  const role = opts.effortRole ?? opts.phase ?? null
+  const modelKey = MODEL_EFFORT_KEYS.find(k => k === String(opts.model ?? '').toLowerCase())
+  const hasRole = role != null && Object.prototype.hasOwnProperty.call(phaseEfforts, role)
+  const hasModel = modelKey != null && Object.prototype.hasOwnProperty.call(modelEfforts, modelKey)
+  if (hasRole && phaseEfforts[role] !== null) return { effort: phaseEfforts[role], source: `phase:${role}` }
+  if (hasRole) return { effort: opts.effort, source: `phase:${role}:default` }
+  if (hasModel && modelEfforts[modelKey] !== null) return { effort: modelEfforts[modelKey], source: `model:${modelKey}` }
+  if (hasModel) return { effort: opts.effort, source: `model:${modelKey}:default` }
+  return { effort: opts.effort, source: Object.prototype.hasOwnProperty.call(opts, 'effort') ? 'call-default' : 'omitted' }
+}
+function resolveAgentEffort(opts) { return resolveAgentEffortFrom(MODEL_EFFORTS, PHASE_EFFORTS, opts) }
 function llmAgent(prompt, opts = {}) {
+  const { effortRole, ...agentOpts } = opts
+  const resolved = resolveAgentEffort(opts)
+  if (resolved.effort === undefined) delete agentOpts.effort
+  else agentOpts.effort = resolved.effort
+  log(`[agent-config] label=${opts.label ?? '-'} phase=${opts.phase ?? '-'} role=${effortRole ?? opts.phase ?? '-'} model=${opts.model ?? '-'} requestedEffort=${resolved.effort ?? 'default'} source=${resolved.source} actualModel=unknown effectiveEffort=unknown`)
   return agent(prompt, {
-    ...opts,
-    disallowedTools: [...new Set([...(opts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
+    ...agentOpts,
+    disallowedTools: [...new Set([...(agentOpts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
   })
 }
+// effort-policy:end
 
 // ---------- COMMON：上一轮的拍板结论抄到这里 ----------
 const COMMON = {
@@ -178,6 +214,7 @@ const review = await llmAgent(
     label: 'review:plan',
     phase: 'Review',
     model: ADVISOR_MODEL,
+    effortRole: 'Review',
     effort: 'high',
     schema: {
       type: 'object',

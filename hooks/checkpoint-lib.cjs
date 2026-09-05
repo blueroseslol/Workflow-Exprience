@@ -116,6 +116,20 @@ function cloneJson(v) {
   }
 }
 
+// Resume 可能只回传本轮覆盖项；普通字段后者优先，三类 map 按 key 合并。
+// null 有明确语义（恢复调用点默认值），必须保留，不能用 truthy 过滤掉。
+function mergeResumeArgs(base, next) {
+  const left = cloneJson(base) || {}
+  const right = cloneJson(next) || {}
+  const merged = { ...left, ...right }
+  for (const key of ['decisions', 'modelEfforts', 'phaseEfforts']) {
+    const a = left[key] && typeof left[key] === 'object' && !Array.isArray(left[key]) ? left[key] : {}
+    const b = right[key] && typeof right[key] === 'object' && !Array.isArray(right[key]) ? right[key] : {}
+    if (Object.keys(a).length || Object.keys(b).length || key in left || key in right) merged[key] = { ...a, ...b }
+  }
+  return merged
+}
+
 function firstString(...xs) {
   for (const x of xs) if (typeof x === 'string' && x.trim()) return x.trim()
   return null
@@ -231,7 +245,9 @@ function resolveDependency(cwd, projectRoot, value) {
     if (!isUnderDir(abs, projectRoot)) return { unsupported: value }
     return isFile(abs) ? { abs } : { missing: storedPath(projectRoot, abs) }
   }
-  const roots = [...new Set([projectRoot, cwd].map(path.resolve))]
+  // Array#map 会把 index/array 也传给回调；不能直接传 path.resolve，
+  // 否则第二项会把数字 index 当作路径参数并抛 ERR_INVALID_ARG_TYPE。
+  const roots = [...new Set([projectRoot, cwd].map(p => path.resolve(p)))]
   const matches = roots.map(root => path.resolve(root, value)).filter(isFile)
   const unique = [...new Set(matches.map(path.normalize))]
   if (unique.length > 1) return { ambiguous: value }
@@ -641,7 +657,13 @@ function writeStateFresh(statePath, candidate) {
       if (freshness.unchanged) return { statePath, state: existing, unchanged: true }
       return { skipped: freshness.reason }
     }
-    if (freshness.preserveResumeArgs && existing?.resumeArgs) candidate.resumeArgs = existing.resumeArgs
+    if (freshness.preserveResumeArgs && existing?.resumeArgs) {
+      candidate.resumeArgs = mergeResumeArgs(existing.resumeArgs, candidate.resumeArgs)
+      candidate.effortPolicy = {
+        modelEfforts: cloneJson(candidate.resumeArgs.modelEfforts) || {},
+        phaseEfforts: cloneJson(candidate.resumeArgs.phaseEfforts) || {},
+      }
+    }
     candidate.stateRevision = Number(existing?.stateRevision || 0) + 1
     if (!writeJsonAtomic(statePath, candidate)) return { skipped: 'write-failed' }
     return { statePath, state: candidate }
@@ -742,6 +764,10 @@ function buildStateFromRun({ run, cwd, sessionId = null, legacyUnverified = fals
       changeDir: changeDir ? storedPath(cwd, changeDir) : null,
       milestone,
       resumeArgs,
+      effortPolicy: {
+        modelEfforts: cloneJson(resumeArgs.modelEfforts) || {},
+        phaseEfforts: cloneJson(resumeArgs.phaseEfforts) || {},
+      },
       continuationArgs,
       pendingTransition,
       dirtyWorktree,
@@ -978,4 +1004,7 @@ module.exports = {
   rawRevisionFromFile,
   stableStringify,
   terminalOutcome,
+  mergeResumeArgs,
+  // 仅导出纯解析 helper，供离线边界夹具验证项目根/cwd 的唯一、歧义与越界语义。
+  resolveDependency,
 }

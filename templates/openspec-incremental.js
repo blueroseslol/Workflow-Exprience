@@ -24,12 +24,48 @@ export const meta = {
   ],
 }
 
+// effort-policy:start — 模板沙箱禁 import，五个成品模板保持同一份小型纯 JS policy。
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const MODEL_EFFORT_KEYS = ['haiku', 'sonnet', 'opus', 'fable']
+const PHASE_EFFORT_KEYS = ['Recon', 'Plan', 'Review', 'SpecSync', 'Preflight', 'Implement', 'Verify', 'Audit', 'Commit']
+function normalizeEffortOverrides(raw, kind, allowedKeys) {
+  if (raw == null) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${kind} 必须是对象`)
+  const out = {}
+  for (const [inputKey, value] of Object.entries(raw)) {
+    const key = allowedKeys.find(k => k.toLowerCase() === String(inputKey).toLowerCase())
+    if (!key) throw new Error(`${kind} 包含未知键: ${inputKey}`)
+    if (value !== null && !EFFORT_LEVELS.has(value)) throw new Error(`${kind}.${key} 的 effort 无效: ${value}`)
+    out[key] = value
+  }
+  return out
+}
+const MODEL_EFFORTS = normalizeEffortOverrides(args?.modelEfforts, 'modelEfforts', MODEL_EFFORT_KEYS)
+const PHASE_EFFORTS = normalizeEffortOverrides(args?.phaseEfforts, 'phaseEfforts', PHASE_EFFORT_KEYS)
+function resolveAgentEffortFrom(modelEfforts, phaseEfforts, opts) {
+  const role = opts.effortRole ?? opts.phase ?? null
+  const modelKey = MODEL_EFFORT_KEYS.find(k => k === String(opts.model ?? '').toLowerCase())
+  const hasRole = role != null && Object.prototype.hasOwnProperty.call(phaseEfforts, role)
+  const hasModel = modelKey != null && Object.prototype.hasOwnProperty.call(modelEfforts, modelKey)
+  if (hasRole && phaseEfforts[role] !== null) return { effort: phaseEfforts[role], source: `phase:${role}` }
+  if (hasRole) return { effort: opts.effort, source: `phase:${role}:default` }
+  if (hasModel && modelEfforts[modelKey] !== null) return { effort: modelEfforts[modelKey], source: `model:${modelKey}` }
+  if (hasModel) return { effort: opts.effort, source: `model:${modelKey}:default` }
+  return { effort: opts.effort, source: Object.prototype.hasOwnProperty.call(opts, 'effort') ? 'call-default' : 'omitted' }
+}
+function resolveAgentEffort(opts) { return resolveAgentEffortFrom(MODEL_EFFORTS, PHASE_EFFORTS, opts) }
 function llmAgent(prompt, opts = {}) {
+  const { effortRole, ...agentOpts } = opts
+  const resolved = resolveAgentEffort(opts)
+  if (resolved.effort === undefined) delete agentOpts.effort
+  else agentOpts.effort = resolved.effort
+  log(`[agent-config] label=${opts.label ?? '-'} phase=${opts.phase ?? '-'} role=${effortRole ?? opts.phase ?? '-'} model=${opts.model ?? '-'} requestedEffort=${resolved.effort ?? 'default'} source=${resolved.source} actualModel=unknown effectiveEffort=unknown`)
   return agent(prompt, {
-    ...opts,
-    disallowedTools: [...new Set([...(opts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
+    ...agentOpts,
+    disallowedTools: [...new Set([...(agentOpts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
   })
 }
+// effort-policy:end
 
 const REPO = args?.repo ?? '<D:/path/to/repo>'
 const GNX = args?.gitnexusRepo ?? '<indexed-repo-name>'
@@ -47,6 +83,16 @@ const DECISIONS = args?.decisions ?? {}
 const CHECKPOINT_KEY = args?.checkpointKey ?? `${CHANGE_DIR}::${MILESTONE}`
 const PRIOR_STATE = args?.priorState ?? null
 const CHECKPOINT_VALIDATION = args?.checkpointValidation ?? null
+function samePriorAgentEffort(opts) {
+  if (!PRIOR_STATE) return false
+  try {
+    const priorModels = normalizeEffortOverrides(PRIOR_STATE.resumeArgs?.modelEfforts, 'prior.modelEfforts', MODEL_EFFORT_KEYS)
+    const priorPhases = normalizeEffortOverrides(PRIOR_STATE.resumeArgs?.phaseEfforts, 'prior.phaseEfforts', PHASE_EFFORT_KEYS)
+    return resolveAgentEffortFrom(priorModels, priorPhases, opts).effort === resolveAgentEffort(opts).effort
+  } catch {
+    return false
+  }
+}
 const CHECKPOINT_SCHEMA_VERSION = 2
 const CHECKPOINT_CACHE_VERSION = 2
 const CHECKPOINT_TEMPLATE_KIND = 'openspec-incremental-v5'
@@ -81,7 +127,7 @@ const NEEDS_CHECKPOINT_VALIDATE = LEGACY_ARTIFACT_CANDIDATE || DIRTY_ARTIFACT_CA
 const ARTIFACT_REUSE = TRUSTED_ARTIFACT_REUSE || NEEDS_CHECKPOINT_VALIDATE
 
 const MODEL_RECON = args?.reconModel ?? 'haiku'
-const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet' // 本机 Kimi K3
+const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet' // 常规工程角色
 const MODEL_STRONG = args?.strongModel ?? 'opus'
 const MODEL_REVIEW = args?.reviewModel ?? 'fable'
 const MODEL_VERIFY = args?.verifyModel ?? 'haiku'
@@ -234,7 +280,7 @@ function applyPatch(plan,p){
 function digest(p){return[`basis=${p.executionBasis}`,`slices:\n${p.slices.map(s=>`- ${s.id} tasks=${s.sourceTaskIds.join(',')} files=${s.files.join(', ')} — ${s.rationale}`).join('\n')}`,`whitelist=${p.whitelist.join(', ')}`,`mustNotTouch=${p.mustNotTouch.join(', ')||'无'}`,`evidenceDependencies=${p.evidenceDependencies.join(', ')||'无'}`,`tests=${p.testCommands.join(' && ')}`,`risk=${p.predictedImpact.risk}`].join('\n\n')}
 
 phase('Recon')
-const reconArtifactHit=!!(TRUSTED_ARTIFACT_REUSE&&PRIOR_STATE.recon)
+const reconArtifactHit=!!(TRUSTED_ARTIFACT_REUSE&&PRIOR_STATE.recon&&samePriorAgentEffort({phase:'Recon',model:MODEL_RECON}))
 const recon=reconArtifactHit ? PRIOR_STATE.recon : await llmAgent([
   '你是 OpenSpec-first Recon（只读）。OpenSpec 是上游 Plan IR，但必须用源码/GitNexus 验证是否仍成立。',
   `任务：${TASK}`,`repo=${REPO}`,`proposal=${PROPOSAL_DOC}`,`design=${DESIGN_DOC}`,`tasks=${TASKS_DOC}`,PLAN_DOC?`plan=${PLAN_DOC}`:'',`specs=${SPECS_GLOB}`,`目标=${MILESTONE}`,
@@ -278,7 +324,7 @@ const priorBasePlan=PRIOR_STATE?.basePlan??null
 const priorEffectivePlan=PRIOR_STATE?.effectivePlan??null
 const priorApprovedEffectivePlan=PRIOR_STATE?.review?.verdict==='approve'?priorEffectivePlan:null
 const sameDecisions=ARTIFACT_REUSE&&decisionKey(PRIOR_STATE?.decisionApply?.decisions)===decisionKey(DECISIONS)
-const basePlanArtifactHit=!!(ARTIFACT_REUSE&&priorBasePlan&&(TRUSTED_ARTIFACT_REUSE||priorValidation?.planStillValid===true)&&(!priorRoute||ROUTE_RANK[priorRoute]>=ROUTE_RANK[routing.route]))
+const basePlanArtifactHit=!!(ARTIFACT_REUSE&&priorBasePlan&&(TRUSTED_ARTIFACT_REUSE||priorValidation?.planStillValid===true)&&samePriorAgentEffort({phase:'Plan',model:plannerModel,effort:'high'})&&(!priorRoute||ROUTE_RANK[priorRoute]>=ROUTE_RANK[routing.route]))
 // dirty 选择性恢复必须从上次已批准 EffectivePlan 起步，避免撤销未变化 slice 的历史 patch。
 const recoverySliceIds=DIRTY_ARTIFACT_CANDIDATE&&sameDecisions&&priorApprovedEffectivePlan&&priorValidation&&priorValidation.planStillValid!==true
   ?(priorValidation.changedSliceIds??[]).filter(id=>priorApprovedEffectivePlan.slices?.some(s=>s.id===id)):[]
@@ -337,6 +383,7 @@ const makeReviewInput=(mode,currentPlan,currentChanged)=>stableStringify({
   effectivePlan:currentPlan,
   effectiveRoute,
   reviewModel:MODEL_REVIEW,
+  reviewEffort:resolveAgentEffort({phase:'Review',model:MODEL_REVIEW,effort:'high'}).effort??null,
   mode,
   changedSliceIds:currentChanged,
   decisions:DECISIONS,
@@ -452,7 +499,7 @@ const needsAudit=effectiveRoute==='CRITICAL'||routeMiss||architectChoices.length
 let audit=null
 if(needsAudit){
   phase('Audit')
-  audit=await llmAgent(['你是 Final Audit。亲自看 git diff/changed files/关键 caller/OpenSpec requirements，不得只看摘要。',`route=${effectiveRoute}; routeMiss=${routeMiss}; architectureDecisionGate=${architectChoices.length>0}`,architectChoices.length?`架构决议：${architectChoices.map(x=>`${x.id}=${x.label}: ${x.consequence}`).join('；')}`:'',digest(plan),`verify=${verify?.status??'?'} ${verify?.testPassed??'?'}/${verify?.testTotal??'?'}`, '重点：实现是否偏离 spec/design、OpenSpec sync 是否漏掉已批准 delta、实际 blast radius 是否超计划。'].filter(Boolean).join('\n'),{label:'final-audit',phase:'Audit',model:MODEL_REVIEW,effort:'high',schema:AUDIT_SCHEMA})
+  audit=await llmAgent(['你是 Final Audit。亲自看 git diff/changed files/关键 caller/OpenSpec requirements，不得只看摘要。',`route=${effectiveRoute}; routeMiss=${routeMiss}; architectureDecisionGate=${architectChoices.length>0}`,architectChoices.length?`架构决议：${architectChoices.map(x=>`${x.id}=${x.label}: ${x.consequence}`).join('；')}`:'',digest(plan),`verify=${verify?.status??'?'} ${verify?.testPassed??'?'}/${verify?.testTotal??'?'}`, '重点：实现是否偏离 spec/design、OpenSpec sync 是否漏掉已批准 delta、实际 blast radius 是否超计划。'].filter(Boolean).join('\n'),{label:'final-audit',phase:'Audit',effortRole:'Audit',model:MODEL_REVIEW,effort:'high',schema:AUDIT_SCHEMA})
   if(!audit)return checkpointEnvelope({status:'failed',at:'Audit',verify})
 }
 const auditBlocks=needsAudit&&audit.verdict!=='accept'

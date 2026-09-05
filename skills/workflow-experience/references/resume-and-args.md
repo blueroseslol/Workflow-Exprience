@@ -97,7 +97,7 @@ docs/ultracode/state/<checkpoint>.json
 
 1. `nativeResume=true`：同 session + 原 scriptPath 仍存在 + script SHA1 相同 + **journal.jsonl 已核实存在** → **必须优先原生 resume**，不要重新 author；args 取 state 的 `resumeArgs` 全量叠加本轮新 args（全量替换非合并，缺失首轮 args 会回退占位默认值制造粘滞 miss）；
 2. `valid=true` 但不能 native resume：Read state JSON，把完整对象传 `args.priorState`，同时传 `checkpointKey` 与 `checkpointValidation` → OpenSpec 模板允许 `ARTIFACT HIT`；
-3. `dirty=true`（上轮实现未完成或 Verify 未绿）：fingerprint 是对着 partial workspace 算的所以仍可能 valid，但 Reviewer 从未审过这份代码 → **禁止直接 Plan/Review HIT**，先廉价 CheckpointValidate；v0.4.2 起部分失效且 `changedSliceIds` 可定位时以历史 Plan 为起点做定向 PlanPatch（`requiresArchitect` 决定 Kimi/Opus），随后 Review 循环第一轮自动成为 DeltaReview，不再全量重跑 Planner；全部失效/无法定位/patch blocked 才回退全量或转人工；
+3. `dirty=true`（上轮实现未完成或 Verify 未绿）：fingerprint 是对着 partial workspace 算的所以仍可能 valid，但 Reviewer 从未审过这份代码 → **禁止直接 Plan/Review HIT**，先廉价 CheckpointValidate；v0.4.2 起部分失效且 `changedSliceIds` 可定位时以历史 Plan 为起点做定向 PlanPatch（`requiresArchitect` 决定 Sonnet/Opus），随后 Review 循环第一轮自动成为 DeltaReview，不再全量重跑 Planner；全部失效/无法定位/patch blocked 才回退全量或转人工；
 4. `legacy=true`：这是从 v0.3 raw 回填的历史结果，没有生成时刻 fingerprint，**禁止直接 artifact hit**。同 session 仍可 native resume；否则传 `legacyUnverified=true`，由廉价 Recon/Haiku 做一次 CheckpointValidate，定向重读当前 OpenSpec 与旧 Plan 涉及代码；验证通过才跳过昂贵 BasePlan/Review；
 5. 普通 `valid=false`：OpenSpec 或 Plan 依赖代码已经变化 → 不得复用历史 Plan/Review。
 

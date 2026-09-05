@@ -51,12 +51,48 @@ export const meta = {
   ],
 }
 
+// effort-policy:start — 模板沙箱禁 import，五个成品模板保持同一份小型纯 JS policy。
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const MODEL_EFFORT_KEYS = ['haiku', 'sonnet', 'opus', 'fable']
+const PHASE_EFFORT_KEYS = ['Recon', 'Plan', 'Review', 'Advisor', 'Preflight', 'Implement', 'Verify', 'Audit', 'Commit']
+function normalizeEffortOverrides(raw, kind, allowedKeys) {
+  if (raw == null) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${kind} 必须是对象`)
+  const out = {}
+  for (const [inputKey, value] of Object.entries(raw)) {
+    const key = allowedKeys.find(k => k.toLowerCase() === String(inputKey).toLowerCase())
+    if (!key) throw new Error(`${kind} 包含未知键: ${inputKey}`)
+    if (value !== null && !EFFORT_LEVELS.has(value)) throw new Error(`${kind}.${key} 的 effort 无效: ${value}`)
+    out[key] = value
+  }
+  return out
+}
+const MODEL_EFFORTS = normalizeEffortOverrides(args?.modelEfforts, 'modelEfforts', MODEL_EFFORT_KEYS)
+const PHASE_EFFORTS = normalizeEffortOverrides(args?.phaseEfforts, 'phaseEfforts', PHASE_EFFORT_KEYS)
+function resolveAgentEffortFrom(modelEfforts, phaseEfforts, opts) {
+  const role = opts.effortRole ?? opts.phase ?? null
+  const modelKey = MODEL_EFFORT_KEYS.find(k => k === String(opts.model ?? '').toLowerCase())
+  const hasRole = role != null && Object.prototype.hasOwnProperty.call(phaseEfforts, role)
+  const hasModel = modelKey != null && Object.prototype.hasOwnProperty.call(modelEfforts, modelKey)
+  if (hasRole && phaseEfforts[role] !== null) return { effort: phaseEfforts[role], source: `phase:${role}` }
+  if (hasRole) return { effort: opts.effort, source: `phase:${role}:default` }
+  if (hasModel && modelEfforts[modelKey] !== null) return { effort: modelEfforts[modelKey], source: `model:${modelKey}` }
+  if (hasModel) return { effort: opts.effort, source: `model:${modelKey}:default` }
+  return { effort: opts.effort, source: Object.prototype.hasOwnProperty.call(opts, 'effort') ? 'call-default' : 'omitted' }
+}
+function resolveAgentEffort(opts) { return resolveAgentEffortFrom(MODEL_EFFORTS, PHASE_EFFORTS, opts) }
 function llmAgent(prompt, opts = {}) {
+  const { effortRole, ...agentOpts } = opts
+  const resolved = resolveAgentEffort(opts)
+  if (resolved.effort === undefined) delete agentOpts.effort
+  else agentOpts.effort = resolved.effort
+  log(`[agent-config] label=${opts.label ?? '-'} phase=${opts.phase ?? '-'} role=${effortRole ?? opts.phase ?? '-'} model=${opts.model ?? '-'} requestedEffort=${resolved.effort ?? 'default'} source=${resolved.source} actualModel=unknown effectiveEffort=unknown`)
   return agent(prompt, {
-    ...opts,
-    disallowedTools: [...new Set([...(opts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
+    ...agentOpts,
+    disallowedTools: [...new Set([...(agentOpts.disallowedTools ?? []), 'SendMessage', 'ListAgents'])],
   })
 }
+// effort-policy:end
 
 // ---------- CONFIG（改这里） ----------
 const REPO = args?.repo ?? '<D:/path/to/repo>'
@@ -69,11 +105,11 @@ const MILESTONE = args?.milestone ?? '<x.y>'
 const TS = args?.ts ?? 'unknown-ts'                       // 时间戳必须外部注入：脚本内 Date.now() 会 throw
 
 // 模型别名（写逻辑别名而非第三方全 ID，未来换 provider 不用改脚本；全部可被 args 覆盖）
-const MODEL_RECON = args?.reconModel ?? 'haiku'     // DeepSeek V4 Flash
-const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet' // Kimi K3
-const MODEL_STRONG = args?.strongModel ?? 'opus'     // Claude Opus 5
-const MODEL_REVIEW = args?.reviewModel ?? 'fable'    // GPT-5.6 Sol
-const MODEL_VERIFY = args?.verifyModel ?? 'haiku'    // DeepSeek V4 Flash
+const MODEL_RECON = args?.reconModel ?? 'haiku'       // 事实侦察角色
+const MODEL_DEFAULT = args?.defaultModel ?? 'sonnet'  // 常规工程角色
+const MODEL_STRONG = args?.strongModel ?? 'opus'      // 架构/升级角色；保留 Opus
+const MODEL_REVIEW = args?.reviewModel ?? 'fable'     // 独立审阅角色
+const MODEL_VERIFY = args?.verifyModel ?? 'haiku'     // 机械验证角色
 const MODEL_PREFLIGHT = args?.preflightModel ?? MODEL_VERIFY
 const MODEL_COMMIT = args?.commitModel ?? MODEL_VERIFY
 // Implement 顾问：默认 fable，只做只读裁决；最多 3 次，仍不收敛才升级实现模型
@@ -140,6 +176,16 @@ const CHECKPOINT_META = {
 }
 const PRIOR_STATE = args?.priorState ?? null
 const CHECKPOINT_VALIDATION = args?.checkpointValidation ?? null
+function samePriorAgentEffort(opts) {
+  if (!PRIOR_STATE) return false
+  try {
+    const priorModels = normalizeEffortOverrides(PRIOR_STATE.resumeArgs?.modelEfforts, 'prior.modelEfforts', MODEL_EFFORT_KEYS)
+    const priorPhases = normalizeEffortOverrides(PRIOR_STATE.resumeArgs?.phaseEfforts, 'prior.phaseEfforts', PHASE_EFFORT_KEYS)
+    return resolveAgentEffortFrom(priorModels, priorPhases, opts).effort === resolveAgentEffort(opts).effort
+  } catch {
+    return false
+  }
+}
 const STATE_KEY_MATCH = !!(PRIOR_STATE && PRIOR_STATE.kind === 'ultracode-semantic-state' && PRIOR_STATE.checkpointKey === CHECKPOINT_KEY)
 const STATE_COMPATIBLE = !!(STATE_KEY_MATCH &&
   PRIOR_STATE.schemaVersion === CHECKPOINT_SCHEMA_VERSION &&
@@ -607,7 +653,8 @@ function computeRouting(recon) {
 
 // ================= Recon：haiku 建证据地图 =================
 phase('Recon')
-const reconArtifactHit = !!(TRUSTED_ARTIFACT_REUSE && PRIOR_STATE.recon)
+const reconArtifactHit = !!(TRUSTED_ARTIFACT_REUSE && PRIOR_STATE.recon
+  && samePriorAgentEffort({ phase: 'Recon', model: MODEL_RECON }))
 const recon = reconArtifactHit
   ? PRIOR_STATE.recon
   : await llmAgent(
@@ -722,6 +769,7 @@ if (NEEDS_CHECKPOINT_VALIDATE && priorBasePlan) {
 const priorRoute = PRIOR_STATE?.routing?.route ?? null
 const basePlanArtifactHit = !!(ARTIFACT_REUSE && priorBasePlan && !HAS_REPLAN_INPUT
   && (TRUSTED_ARTIFACT_REUSE || priorValidation?.planStillValid === true)
+  && samePriorAgentEffort({ phase: 'Plan', model: plannerModel, effort: 'high' })
   && (!priorRoute || ROUTE_RANK[priorRoute] >= ROUTE_RANK[routing.route]))
 
 const basePlan = basePlanArtifactHit
@@ -812,6 +860,7 @@ const reviewInputCanonical = stableStringify({
   uncertaintyScore: routing.uncertaintyScore,
   forcedEscalations: routing.forcedEscalations,
   reviewModel,
+  reviewEffort: resolveAgentEffort({ phase: 'Review', model: reviewModel, effort: 'high' }).effort ?? null,
   architectureDecisionGate,
   architectureChoices,
 })
@@ -880,7 +929,7 @@ if (needsReview) {
     ? PRIOR_STATE.review
     : await llmAgent(
     [
-      '你是独立审阅者（GPT-5.6 Sol）。**你不是第二个 Planner，你的任务是反驳这份计划，不是附和。**',
+      '你是独立审阅者。**你不是第二个 Planner，你的任务是反驳这份计划，不是附和。**',
       '',
       planDigest,
       '',
@@ -979,7 +1028,7 @@ const pre = await llmAgent(
 if (!pre) return withPlanState({ status: 'failed', at: 'Preflight', reason: 'preflight agent 未返回', review, routing, checkpoint: CHECKPOINT_META })
 if (!pre.ready) return withPlanState({ status: 'blocked', at: 'Preflight', blockers: pre.blockers, review, preflight: pre, routing, checkpoint: CHECKPOINT_META })
 
-// ================= Implement：Kimi/Opus 主实现 + 有界 Fable Advisor Loop =================
+// ================= Implement：默认/强角色主实现 + 有界 Fable Advisor Loop =================
 phase('Implement')
 // DECIDED 摘要只透传实现层(latestFeedback:字符串开放问题的答案由实现层现场裁决,不改 Plan;
 // decisionPoints 已由 JS applyDecisions 应用进 effectivePlan)
@@ -1157,13 +1206,14 @@ for (let implementAttempt = 0; implementAttempt <= ADVISOR_MAX; implementAttempt
       '你必须亲自 Read 相关文件；必要时查看 git diff、测试输出、GitNexus context/impact。',
       '禁止 Edit/Write，禁止用 Bash 改文件；你只提供分析、证据和下一步。',
       '不要因为实现者说“困难”就附和。若局部方案可继续，选 continue/change-approach；',
-      '若 Plan 本身错误选 replan；需用户决策选 stop-and-ask；Kimi 已不适合继续时选 escalate-implementation。',
+      '若 Plan 本身错误选 replan；需用户决策选 stop-and-ask；当前实现角色已不适合继续时选 escalate-implementation。',
       'evidence 尽量给 file:line / git diff / 测试 / GitNexus 证据。',
     ].join('\n'),
     {
       label: `implement-advisor:${advisorCalls}`,
       phase: 'Review',
       model: ADVISOR_MODEL,
+      effortRole: 'Advisor',
       effort: 'high',
       schema: IMPLEMENT_ADVISOR_SCHEMA,
       disallowedTools: ['Edit', 'Write'],
@@ -1349,7 +1399,7 @@ if (needsAudit) {
   phase('Audit')
   audit = await llmAgent(
     [
-      '你是最终审计者（GPT-5.6 Sol），独立于 Plan/Implement/Verify 之外做最后把关。',
+      '你是最终审计者，独立于 Plan/Implement/Verify 之外做最后把关。',
       '',
       `路由：${routing.route}` + (routeMiss ? `，且出现 routeMiss（实测影响超预估）` : '') + (architectureDecisionGate ? '，且架构决议强门已启用' : ''),
       architectureDecisionGate
@@ -1371,7 +1421,7 @@ if (needsAudit) {
       '重点审计：routeMiss 暴露的低估、未验证假设、跨模块副作用、回滚完整性。',
       'verdict=accept / needs-rework / escalate-to-human。非 accept 将阻止提交。',
     ].filter(Boolean).join('\n'),
-    { label: 'final-audit', phase: 'Audit', model: reviewModel, effort: 'high', schema: AUDIT_SCHEMA }
+    { label: 'final-audit', phase: 'Audit', effortRole: 'Audit', model: reviewModel, effort: 'high', schema: AUDIT_SCHEMA }
   )
 }
 

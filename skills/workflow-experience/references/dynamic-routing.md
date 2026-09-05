@@ -1,6 +1,6 @@
 # 动态模型路由（GitNexus 复杂度评分）
 
-把固定模型链（Opus Plan → Sol Review → Haiku Preflight → Kimi Implement → Haiku Verify）升级为**按证据路由**：便宜模型发现事实，JS 纯函数算风险，强模型只在真正需要时介入。
+把固定逻辑链（Opus Plan → Fable Review → Haiku Preflight → Sonnet Implement → Haiku Verify）升级为**按证据路由**：侦察角色发现事实，JS 纯函数算风险，升级角色只在真正需要时介入。
 
 > 第一目标：降低 killed / failed / abort / 返工。省 token 是第二目标。
 > 配套模板：`../../templates/gitnexus-routed.js`（实验性，与 `four-phase.js` baseline 并存）
@@ -13,10 +13,10 @@
 
 | 别名 | 实际模型 | 路由里的角色 |
 |---|---|---|
-| `haiku` | DeepSeek V4 Flash | Scout（Recon / Verify 机械核对） |
-| `sonnet` | Kimi K3 | Default Engineer（默认 Plan / Implement） |
-| `opus` | Claude Opus 5 | Escalation Architect（HIGH+ Plan / CRITICAL Implement） |
-| `fable` | GPT-5.6 Sol | Independent Judge（对抗 Review / Final Audit） |
+| `haiku` | provider 可配置 | Scout（Recon / Verify 机械核对） |
+| `sonnet` | provider 可配置 | Default Engineer（默认 Plan / Implement） |
+| `opus` | provider 可配置 | Escalation Architect（HIGH+ Plan / CRITICAL Implement） |
+| `fable` | provider 可配置 | Independent Judge（对抗 Review / Final Audit） |
 
 约束模型行为**不要**依赖 `effort: max/xhigh` 一定发送（`haiku+max` 是空操作、`sonnet+xhigh` 会降级，见 `model-effort.md`）。要靠 schema、evidence、file:line、exit code、raw output、GitNexus graph evidence 施压。
 
@@ -24,7 +24,7 @@
 
 ## 二、核心原则：Recon 只出事实，JS 算分
 
-**不要让 Recon 模型自己输出 `complexityScore: 78` 然后直接信它。** DeepSeek 只负责输出原始指标（深度计数、流程数、布尔标记），评分由 Workflow JS 用确定性算法算。
+**不要让 Recon 模型自己输出 `complexityScore: 78` 然后直接信它。** Recon 只负责输出原始指标（深度计数、流程数、布尔标记），评分由 Workflow JS 用确定性算法算。
 
 理由：
 1. **确定性** —— 同一份 Recon facts + 同一套阈值 + 同一组 args = 同一个 route，resume 才能命中缓存。
@@ -114,8 +114,8 @@ const ALWAYS_REVIEW = args?.alwaysReview ?? false   // true → LOW 也过 Revie
 Recon 预判只是第一次估计。完整链路要有**三层纠偏**，且闸门都是 JS 纯函数（不耗 token、不进缓存键）：
 
 ```
-第一次：DeepSeek Recon + GitNexus 预判 → computeRouting() 冻结 route
-第二次：Kimi/Opus Planner 亲自读码纠偏 → Plan Risk Gate
+第一次：Haiku Recon + GitNexus 预判 → computeRouting() 冻结 route
+第二次：Sonnet/Opus Planner 亲自读码纠偏 → Plan Risk Gate
 第三次：实现后 GitNexus detect_changes 实测 → routeMiss → Final Audit
 ```
 
@@ -149,10 +149,10 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 推荐链：
 
 ```text
-Kimi/Sonnet Implement
+Sonnet Implement
   → 普通问题自己解决
   → 有证据的疑难点 → Fable Advisor
-  → continue/change-approach → Kimi 继续
+  → continue/change-approach → 当前实现角色继续
   → replan → 复用 replanFeedback/replanAttempt
   → stop-and-ask → need-decision
   → 多次仍不收敛 / escalate-implementation → 仅 Implement 升级 Opus
@@ -169,11 +169,11 @@ const ADVISOR_MODEL = args?.advisorModel ?? 'fable'
 const ADVISOR_MAX = args?.advisorMax ?? 3
 ```
 
-顾问只输出 `continue / change-approach / replan / stop-and-ask / escalate-implementation`，代码 ownership 始终属于 Kimi/Opus。模板用 `disallowedTools: ['Edit', 'Write']` 禁掉直接编辑；**Bash 仍可执行，因此“Bash 不得写文件”目前是 prompt 约束，不要描述成完全的硬只读沙箱**。
+顾问只输出 `continue / change-approach / replan / stop-and-ask / escalate-implementation`，代码 ownership 始终属于 Sonnet/Opus 角色。模板用 `disallowedTools: ['Edit', 'Write']` 禁掉直接编辑；**Bash 仍可执行，因此“Bash 不得写文件”目前是 prompt 约束，不要描述成完全的硬只读沙箱**。
 
 `advisorModel` 进缓存键：一次 run 中途切换它会让 Advisor 及其后所有 agent 重跑——预算内选定就不要中途换。
 
-顾问达到上限仍不收敛时，不继续烧 token：若当前是 Kimi，则早退 `implementation-escalation-required`，通过：
+顾问达到上限仍不收敛时，不继续烧 token：若当前是默认实现角色，则早退 `implementation-escalation-required`，通过：
 
 ```js
 nextArgs: {
@@ -256,7 +256,7 @@ routing: {
 
 ## 九、不要重复昂贵阅读
 
-token 优势应来自：**DeepSeek 大范围 Recon → 强模型只重读关键文件**。
+token 优势应来自：**Haiku 大范围 Recon → 规划/实现角色只重读关键文件**。
 
 而不是四个模型各自读完整仓库。Recon 的 Evidence Map（entrySymbols + file:line + impact 计数）帮助 Planner **精确定位**关键代码；但 Planner 必须保留亲自重读入口/caller/callee/public interface/tests/lifecycle 的权利。
 

@@ -29,7 +29,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 **OpenSpec-first 细则**：Read `references/openspec-first.md`。关键点：
 - OpenSpec artifacts 是长期 Plan IR；BasePlan 只产 execution overlay / delta；
 - `args.decisions` **不得进入 BasePlan prompt**；普通 DecisionApply 优先 JS 0 token；
-- Kimi K3（逻辑别名 `sonnet`）负责机械/局部 PlanPatch 与 SpecSync；
+- 逻辑别名 `sonnet` 负责机械/局部 PlanPatch 与 SpecSync；
 - **上一版是谁写的不决定下一版用谁**：只有本轮出现新增架构推理才回 Opus；
 - Review revise 默认 PlanPatch + DeltaReview，不 Full Replan。
 
@@ -62,7 +62,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 | Phase | model | effort | 职责 |
 |---|---|---|---|
 | Recon | `haiku` | — | OpenSpec/GitNexus/代码事实、drift、爆炸半径 |
-| BasePlan（OpenSpec 已覆盖设计） | `sonnet` | `high` | Kimi K3 做 execution overlay / task→slice 映射 |
+| BasePlan（OpenSpec 已覆盖设计） | `sonnet` | `high` | execution overlay / task→slice 映射 |
 | BasePlan / PlanDelta（新增架构推理） | `opus` | `high` | 架构、public contract、状态所有权等 |
 | DecisionApply | JS | — | 应用 Planner 预编码的用户选择；默认 0 token |
 | PlanPatch（mechanical/slice） | `sonnet` | `high` | 修局部 slice / whitelist / tests / task 映射 |
@@ -72,31 +72,19 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 | Implement | `sonnet` / `opus` | `xhigh` | 路由派生；CRITICAL 默认 Opus |
 | Verify / Commit | `haiku` | — | 测试、GitNexus 实测、证据后勾 task、提交 |
 
-**模型连续性不是路由依据。** 即使上一版 Plan 是 Opus 5 写的，只要后续只是应用已结构化决策、补 whitelist/test、修改单个 slice 或把批准结果同步进 Markdown，仍用 JS/Kimi。只有本轮需要新的架构推理才回 Opus。
+**模型连续性不是路由依据。** 即使上一版 Plan 使用 `opus`，只要后续只是应用已结构化决策、补 whitelist/test、修改单个 slice 或把批准结果同步进 Markdown，仍用 JS/`sonnet`。只有本轮需要新的架构推理才回 `opus`。
 
 **Opus 门**：新增/改变 architecture boundary、public API/schema、cross-repo contract、concurrency/lifecycle/state-machine ownership、persistence/migration/security 语义，或 Reviewer 用证据推翻原架构假设。单纯高 blast radius 但 OpenSpec design 已完整覆盖，不自动要求 Opus 重写 Plan；高风险仍由 Review/Verify/Audit 兜底。
 
 **effort 本机差异**：`haiku+max` 可能被吞、`sonnet+xhigh` 降级；以退出码/测试计数为准，不唯 effort。
 
-**Haiku 类模型 effort 规则**：首试 `max`，明确不支持才 `max→xhigh→high` 重试；`null`/超时/鉴权错误不得误判为不支持。详见 `references/model-effort.md`。
+**用户 effort 覆盖（v0.5.0）**：把逻辑模型覆盖放入 `args.modelEfforts`，把阶段/角色覆盖放入 `args.phaseEfforts`；允许 `low/medium/high/xhigh/max/null`。阶段或角色优先于逻辑模型，`null` 恢复调用点默认，未指定项保持旧行为。`Review`、`Advisor`、`Audit` 可独立设置。恢复时两张 map 都按 key 合并；提高 Plan/Recon effort 会使对应语义 artifact 失效，提高 Review effort 只重审而不无故重做未变 BasePlan。wrapper 日志中的 requested 只是请求值，实际上游模型/effort 无证据时为 unknown。
+
+**effort 失败规则**：wrapper 不自动降级或换模型；只有 runtime/provider 给出明确 capability 错误并且用户已授权相应策略时才调整。`null`、超时、schema、鉴权、限流或网络错误都不是能力证据。详见 `references/model-effort.md`。
 
 **Haiku 上下文恢复 v0.4.5**：运行中的 `agent() === null` 原因不透明，不得盲目换模型。Stop/harvest 从终态 `workflowProgress/logs` 命中明确上下文/自动压缩签名，且失败代理属于 Haiku lane、run 未成功时，才用 `decision:block` 续起主会话一次。恢复必须优先原 `scriptPath + resumeFromRunId`，在原 args 上仅把失败 phase 对应的 `reconModel/preflightModel/verifyModel/commitModel` 改为 `sonnet`；先检查工作区/测试/提交，禁止重复副作用。同一终态指纹只恢复一次，Sonnet 再失败则如实停止。详见 `references/model-effort.md`。
 
 **动态路由**见 `references/dynamic-routing.md`。**Codex 覆盖默认关闭**：Review/Audit 仍是 `fable`；只有用户明确要求时，authoring 阶段才按 `references/codex-cli.md` 改写本次 workflow。
-
-## OpenSpec-first 三条成本红线
-
-1. **不要把新 decisions 插回 BasePlan prompt。** prompt 进 cacheKey，这会让昂贵 Plan 及下游粘滞 miss。
-2. **不要因为 Review=revise 就 Full Replan。** Reviewer 必须给 `affectedSliceIds`；mechanical/slice 用 Kimi PlanPatch，architecture 才 Opus。
-3. **不要维护平行 Plan。** artifact gap 经 Review/拍板后通过 SpecSync 写回原 OpenSpec，下次直接复用 Git 中的 planning IR。
-
-## 五条约束句式（按命中率，原文见 references/constraints.md）
-
-1. **file:line** — `每条代码事实必须引用你亲自 Read 到的 file:line，禁止凭摘要或记忆。`
-2. **白名单** — `只允许修改 whitelist 内的文件；mustNotTouch 内的一律不动。`
-3. **改前改后 Read** — `改前先 Read 目标文件，改后再 Read 一次确认落盘符合预期。`
-4. **证据才勾选** — `没有测试输出或命令退出码作证据，不得勾选任何 checkbox。`
-5. **git 安全** — `禁止 git add . / -A，逐文件 add；feat 与 docs 分两笔；不 push。`
 
 ## advisor（Implement 疑难点）
 
@@ -110,7 +98,7 @@ OpenSpec-first 若实现阶段发现 **Plan 本身**失效，优先分类 mechan
 
 OpenSpec 项目中，OpenSpec artifact 是第一 planning source of truth；harvest 的 LLM result 是辅助证据。若两者冲突，必须重新验证 workspace/drift，不得凭历史摘要覆盖 Git 中已更新的 artifact。
 
-**统一 wrapper 硬门（v0.4.5）**：顶层 Workflow DSL 没有 `SendMessage` / `ListAgents` primitive，但 `agent()` 启动的子代理可能从其工具面获得二者；只写 prompt 禁令不足。所有成品模板与新写 workflow 的每次 LLM 调用都必须经过统一 wrapper，在 `opts.disallowedTools` 中合并 `SendMessage`、`ListAgents` 并保留调用点已有项；其余 opts 原样透传，禁止绕过 wrapper 直接调用 `agent()`。上下文恢复由 Stop/harvest 的精确分类处理，不在 wrapper 中把普通 `null` 当作上下文错误。
+**统一 wrapper 硬门（v0.5.0）**：顶层 Workflow DSL 没有 `SendMessage` / `ListAgents` primitive，但 `agent()` 启动的子代理可能从其工具面获得二者；只写 prompt 禁令不足。所有成品模板与新写 workflow 的每次 LLM 调用都必须经过统一 wrapper，在 `opts.disallowedTools` 中合并 `SendMessage`、`ListAgents` 并保留调用点已有项；wrapper 同时解析 effort 覆盖并记录 requested/unknown 观测边界。上下文恢复由 Stop/harvest 的精确分类处理，不在 wrapper 中把普通 `null` 当作上下文错误。
 
 只有当前用户原始需求明确要求“完成后通知主会话 / 回传其他会话 / 同步协调会话”等，才保留即时 handoff 契约；不得从 checkpoint、旧 handoff、并行会话存在或 agent 摘要推断。workflow 内只返回 `broadcast` + 结构化结果；到达 **terminal result** 后，外层 Claude Code 主会话才可解析目标并定向调用 `ListAgents` / `SendMessage`。不新增 LLM handoff phase，不改 BasePlan prompt；投递失败不得宣称成功，仍以 `.claude/progress/*.jsonl` + harvest 为 checkpoint。详见 `references/peer-handoff.md`。
 

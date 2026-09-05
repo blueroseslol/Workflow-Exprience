@@ -128,7 +128,7 @@ flowchart TD
     R -->|approve| SS{"有已批准 openspecEdits？"}
     R -->|block| BL3["blocked"]
     R -->|revise| PM{"scope / requiresArchitect"}
-    PM -->|"mechanical 或 slice"| KP["Kimi PlanPatch"]
+    PM -->|"mechanical 或 slice"| KP["Sonnet PlanPatch"]
     PM -->|architecture| OP["Opus PlanPatch"]
     KP --> L{"patch 轮次未超过上限 2？"}
     OP --> L

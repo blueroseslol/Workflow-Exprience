@@ -26,7 +26,7 @@ BasePlan 预先结构化每个 decision option 对 slice/whitelist/tests 的影�
 
 ### 3. 模型由“当前推理难度”决定，不由“上一版是谁写的”决定
 
-即使 BasePlan 是 Opus 产出，后续机械 DecisionApply / PlanPatch / SpecSync 仍用 JS 或 Kimi K3（`sonnet`）。
+即使 BasePlan 是 Opus 产出，后续机械 DecisionApply / PlanPatch / SpecSync 仍用 JS 或逻辑别名 `sonnet`。
 
 Opus 只用于新增架构推理：公共 API/schema、跨 repo contract、并发/状态机/生命周期 ownership、持久化/迁移、安全边界，或 Reviewer 用证据推翻原架构假设。
 
@@ -34,14 +34,14 @@ Opus 只用于新增架构推理：公共 API/schema、跨 repo contract、并�
 
 Reviewer 输出 `scope / requiresArchitect / affectedSliceIds / requiredChanges`：
 
-- mechanical/slice → Kimi PlanPatch；
+- mechanical/slice → Sonnet PlanPatch；
 - architecture → Opus PlanPatch/PlanDelta；
 - 后续只做 DeltaReview；
 - 默认最多 2 轮，仍不收敛转人工。
 
 ### 5. 已批准 delta 写回 OpenSpec
 
-新增 SpecSync：默认 Kimi，只落地已经批准的 artifact edits，不重新设计；semantic edit 必须绑定已拍板 decision；任务 checkbox 只在 Verify green 后更新。
+新增 SpecSync：默认 Sonnet，只落地已经批准的 artifact edits，不重新设计；semantic edit 必须绑定已拍板 decision；任务 checkbox 只在 Verify green 后更新。
 
 ## 后果
 

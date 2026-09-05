@@ -100,7 +100,9 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 ├── tools/
 │   ├── scan-corpus.mjs      人工触发的语料分析（替代被砍掉的自动闭环）
 │   ├── verify-model-fallback.mjs 上下文分类→Stop 续起→Sonnet phase override 离线验证
-│   └── verify-state-pipeline.mjs 语义缓存管道端到端检查（v0.4.3，含 LDL_UGC 干跑）
+│   ├── verify-effort-routing.mjs 五模板 effort wrapper 的 stub 执行验证
+│   ├── verify-state-pipeline.mjs 语义缓存管道端到端检查（含 LDL_UGC 干跑）
+│   └── verify-all.mjs          全部离线语法与行为验收入口
 ├── legacy/                  codex 深链接接力（独立能力，不参与 plugin 打包）
 └── docs/decisions/          ADR
 ```
@@ -120,6 +122,27 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 **v0.4.4 消息边界**：顶层 Workflow DSL 没有 peer primitive，但 LLM 子代理可能拥有 `ListAgents` / `SendMessage`。五个 `templates/*.js` 成品模板及仍可执行的 `legacy/codex-relay.workflow.js` 统一让每次 agent 调用经过 wrapper，在保留调用点原有 `disallowedTools` 的同时硬禁这两个工具；不依赖 prompt 自律。
 
 **v0.4.5 Haiku 上下文恢复**：Workflow DSL 在运行中只把失败的 `agent()` 暴露为 `null`，无法区分用户跳过、权限、网络、schema 与上下文错误，因此插件不会对普通 `null` 盲目重试。Stop/harvest 会从终态 `workflowProgress/logs` 精确识别 `Prompt is too long`、自动压缩失败和空摘要；仅当失败来自 Haiku lane 且整个 run 未成功时，输出一次 `decision:block` 续起主会话，要求用原 `scriptPath + resumeFromRunId`，把失败 phase 的模型参数改成 `sonnet`。恢复指令强制先核对工作区、测试与最近提交，避免重复副作用；同一终态指纹只触发一次。五个成品模板已补齐 `reconModel/preflightModel/verifyModel/commitModel` 等按阶段覆盖参数。
+
+**v0.5.0 GPT-5.6 Sol / effort 适配**：五个模板支持 `args.modelEfforts` 和 `args.phaseEfforts`。阶段/角色覆盖优先于逻辑模型覆盖，未指定时完全保持原调用点默认；`null` 可恢复默认。Opus/Sonnet 即使映射同一上游，也按逻辑别名独立配置。checkpoint 会按 key 合并两张 map，Plan/Recon effort 改变会失效对应 artifact，Review effort 改变只触发重审。日志只把传给 runtime 的值称为 `requestedEffort`，没有反代证据时 `actualModel/effectiveEffort` 均为 `unknown`。
+
+可直接这样提交需求：
+
+```text
+workflow 修复角色登录状态，opus 使用 max，其他保持默认。
+workflow 实现这个 OpenSpec，Implement 用 sonnet，思考强度 high。
+workflow 继续上次任务，只把 Review 的思考强度提高到 xhigh。
+```
+
+对应的显式 args 形态为：
+
+```js
+{
+  modelEfforts: { opus: 'max' },
+  phaseEfforts: { Implement: 'high', Review: 'xhigh' },
+}
+```
+
+本机 Claude Code 2.1.260 的 CLI 接受 `low/medium/high/xhigh/max`，但客户端接受只证明插件发起了该请求，不证明 cc-switch 后的上游按该强度执行。运行 `node tools/verify-all.mjs` 可完成不调用模型的离线验收。
 
 只有当前用户的原始需求显式要求 handoff 时，workflow 才把它保留为执行契约；workflow 返回 terminal result 后，外层 Claude Code 主会话才可定向执行 `ListAgents` / `SendMessage`。普通并行开发、历史 checkpoint 或其他会话的存在都不得触发即时消息。
 

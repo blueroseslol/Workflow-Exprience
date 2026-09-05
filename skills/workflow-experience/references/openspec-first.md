@@ -73,12 +73,12 @@ OpenSpec 模式下 BasePlan 只负责：
 | 工作 | 模型 | 原因 |
 |---|---|---|
 | Recon / Verify | `haiku` | 事实搜集、机械验证 |
-| OpenSpec 已完整且设计已覆盖的 BasePlan | `sonnet`（本机 Kimi K3） | 只是 execution overlay / 校验，不创造架构 |
+| OpenSpec 已完整且设计已覆盖的 BasePlan | `sonnet` | 只是 execution overlay / 校验，不创造架构 |
 | DecisionApply | **纯 JS** | 用户只是在选择 Planner 预先编码好的分支 |
-| 机械/局部 PlanPatch | `sonnet`（Kimi K3） | 修 whitelist、tests、单 slice、task 映射 |
+| 机械/局部 PlanPatch | `sonnet` | 修 whitelist、tests、单 slice、task 映射 |
 | 架构 PlanDelta / Architecture Patch | `opus` | 需要新的架构推理 |
 | Review / DeltaReview | `fable` | 独立对抗审阅 |
-| SpecSync | `sonnet`（Kimi K3） | 把已批准 delta 落到 Markdown，不重新设计 |
+| SpecSync | `sonnet` | 把已批准 delta 落到 Markdown，不重新设计 |
 | Implement | 路由派生 | CRITICAL 才默认 Opus |
 
 **Opus 产出的 BasePlan 并不要求后续继续用 Opus。** 模型升级依据是“本轮是否需要新的架构推理”，不是“上一轮是谁写的”。
@@ -126,7 +126,7 @@ Reviewer 输出：
 路由：
 
 ```text
-mechanical/slice → Kimi PlanPatch → DeltaReview(changed slices only)
+mechanical/slice → Sonnet PlanPatch → DeltaReview(changed slices only)
 architecture    → Opus PlanPatch → DeltaReview(changed slices only)
 ```
 
@@ -134,7 +134,7 @@ architecture    → Opus PlanPatch → DeltaReview(changed slices only)
 
 ## 6. SpecSync：让本次推理成为下次缓存
 
-批准后的 artifact delta 用 Kimi `SpecSync` 写回原 OpenSpec：proposal/specs/design/tasks/plan。
+批准后的 artifact delta 用 Sonnet `SpecSync` 写回原 OpenSpec：proposal/specs/design/tasks/plan。
 
 红线：
 
@@ -161,7 +161,7 @@ needsStrongPlan =
 plannerModel = needsStrongPlan ? opus : sonnet
 ```
 
-**高 blast radius 不自动等于需要 Opus 重写 Plan。** 若 design/spec/tasks 已经完整覆盖架构，Kimi 可以做 execution overlay；风险仍由 Review / Verify / Final Audit 兜底。
+**高 blast radius 不自动等于需要 Opus 重写 Plan。** 若 design/spec/tasks 已经完整覆盖架构，Sonnet 可以做 execution overlay；风险仍由 Review / Verify / Final Audit 兜底。
 
 ## 8. 跨 session
 
@@ -188,12 +188,12 @@ Opus Full Plan
 变成：
 
 ```text
-Kimi/Opus Base Overlay once
+Sonnet/Opus Base Overlay once
 → JS DecisionApply
 → Review
-→ Kimi local PlanPatch
+→ Sonnet local PlanPatch
 → DeltaReview
-→ Kimi SpecSync
+→ Sonnet SpecSync
 ```
 
 强模型 token 只在“新增架构不确定性”出现时支付。
