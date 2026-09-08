@@ -124,7 +124,7 @@ const GATE_SCHEMA = {
 
 **只读 `~/.codex`，绝不写。** 抽取器只用 `openSync` / `createReadStream`，SQLite 强制 `readOnly: true`。
 
-唯一的官方写入路径是 `codex resume <uuid> "<prompt>"`，但那会消耗一次 codex 付费轮次 —— 只在用户明确要求时用。
+以上为旧实现边界。当前安装支持 `codex queue --thread <id> --message <text>` 定向入队；入队不等于目标已读取。新协作应使用 [session bridge](../skills/workflow-experience/references/session-bridge.md) 的绑定与回执流程。`codex exec resume <id>` 会启动模型轮次，仅用于明确授权且已证明独占的目标，不作为 queue 的自动降级路径。
 
 反向通道走**仓库内的 handoff 文档**：接力完成后追加一段 `## 由 Claude Code 接手 · <ts>`，codex 下次 resume 读工作区时自然看到。零新技术、双向对称。
 

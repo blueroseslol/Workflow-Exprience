@@ -2,6 +2,8 @@
 
 用于 **用户显式要求** 在多个独立 Claude Code 会话之间做定向通知 / 回传 / 同步时。
 
+Codex ↔ Claude Code CLI 使用 [session-bridge.md](session-bridge.md) 的独立 request/CLI/outbox 协议；本文的 Claude peer 默认约束仍适用。bridge 只有在同一 requestId/scope 与原始显式授权均校验通过时，才延续中断任务的回传要求；这不是从历史摘要推断新授权。新任务默认关闭，撤销优先。
+
 ## 何时启用
 
 只在原始用户需求明确表达类似意图时启用，按语义判断，不要求固定关键词：

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-08T09:03:29.171Z",
+  "requestId": "e2e9028c-1c7e-48f2-9f51-282582035a33",
+  "messageId": "e74fbb55f47c1f22b42af643755b72b2bfd99052b33862d0e0201f7f1e057c91",
+  "initialFailure": {
+    "deliveryStatus": "unsupported",
+    "preflightFailed": true,
+    "errorCode": "ENOENT",
+    "attempts": 1
+  },
+  "failedState": {
+    "workStatus": "blocked",
+    "deliveryStatus": "unsupported",
+    "runnerStatus": null
+  },
+  "recovery": {
+    "deliveryStatus": "queued",
+    "transportMessageId": "01a08042-1352-75e2-82b7-892284f83509",
+    "attempts": 2
+  },
+  "receipt": {
+    "schemaVersion": 1,
+    "requestId": "e2e9028c-1c7e-48f2-9f51-282582035a33",
+    "messageId": "e74fbb55f47c1f22b42af643755b72b2bfd99052b33862d0e0201f7f1e057c91",
+    "sessionId": "01a07fe8-2981-7f12-b195-96dda6d53e49",
+    "sha256": "91da792a6f72094bcbf55c84a24ca76e671ba9146a17deba68697b7e000524a4",
+    "receivedAt": "2026-09-08T09:03:29.161Z"
+  },
+  "finalState": {
+    "workStatus": "blocked",
+    "deliveryStatus": "received",
+    "controllerStatus": "received",
+    "runnerStatus": null
+  },
+  "resultUnchanged": true,
+  "workerOutputExists": false
+}

@@ -103,6 +103,10 @@ function main() {
     const status = run.status
     if (!status || status === 'running') continue
 
+    // Bridge only records the explicitly bound session/run. No CLI or model call
+    // occurs in Stop; a later outer completion/drain handles delivery.
+    try { require('../bridge/hooks.cjs').onHarvest({ cwd, sessionId, runId: run.runId || runId, run }) } catch { /* bridge errors must not break harvest */ }
+
     // 四字段指纹(拍板 harvestFingerprint=A,不加 mtime):
     // resume 原地覆写后 result.status/agentCount/totalTokens 至少一项必变 → 重收。
     const fpNow = runFingerprint(run)

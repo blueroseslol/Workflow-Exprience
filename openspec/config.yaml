@@ -1,0 +1,47 @@
+schema: spec-driven
+
+context: |
+  Workflow-Experience 是 Claude Code 的 Ultracode workflow 经验插件。
+  代码为 Node.js CJS hooks、ESM tools、沙箱 Workflow JS 模板，无根 package.json。
+  使用简体中文撰写规划；实施时复用 OpenSpec Plan IR，只生成 execution overlay。
+  保持 strongModel='opus'、modelEfforts/phaseEfforts 和 checkpoint/resume 语义。
+  tools/verify-all.mjs 为离线验收入口；SKILL.md 上限 7000 字符。
+  通信只由显式用户意图启用；Workflow 内部子代理保持消息隔离。
+
+rules:
+  tasks:
+    - 按里程碑依赖拆分，写明文件范围、验收命令和未验证边界。
+    - 对应验收通过后才勾选任务，规划完成不等于功能完成。
+  design:
+    - 区分官方文档、本机 CLI 帮助、源码事实和待实测假设。
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

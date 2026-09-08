@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-08T08:38:49.126Z",
+  "environment": "local Codex app-server stdio plus codex queue CLI",
+  "threadId": "01a0802b-7ea9-7800-aba2-081c364fbbd1",
+  "active": {
+    "observedStatus": {
+      "type": "active",
+      "activeFlags": []
+    },
+    "turnId": "01a0802b-803f-71d1-ad99-e3ba8f008c28",
+    "queue": {
+      "deliveryStatus": "queued",
+      "transportMessageId": "01a0802b-8333-7ca3-8b5c-ccccba2ce4a8",
+      "exitCode": 0,
+      "timedOut": false,
+      "detail": "CLI acknowledged queue; receiver receipt still required"
+    }
+  },
+  "afterActive": {
+    "type": "idle"
+  },
+  "idle": {
+    "observedStatus": {
+      "type": "idle"
+    },
+    "queue": {
+      "deliveryStatus": "queued",
+      "transportMessageId": "01a0802b-f6bf-7e51-9566-d145409e9fc5",
+      "exitCode": 0,
+      "timedOut": false,
+      "detail": "CLI acknowledged queue; receiver receipt still required"
+    }
+  },
+  "loadedReadback": {
+    "queueIds": [
+      "01a0802b-f6bf-7e51-9566-d145409e9fc5"
+    ],
+    "nextCursor": null,
+    "turns": [
+      {
+        "id": "01a0802b-e137-7f01-b536-829a943090ee",
+        "status": "completed",
+        "itemTypes": [
+          "userMessage",
+          "agentMessage"
+        ]
+      },
+      {
+        "id": "01a0802b-803f-71d1-ad99-e3ba8f008c28",
+        "status": "completed",
+        "itemTypes": [
+          "userMessage",
+          "agentMessage",
+          "commandExecution",
+          "agentMessage"
+        ]
+      }
+    ]
+  },
+  "exited": {
+    "observedStatus": {
+      "type": "notLoaded"
+    },
+    "queue": {
+      "deliveryStatus": "queued",
+      "transportMessageId": "01a0802b-f83a-7903-a20a-6f2455f62c51",
+      "exitCode": 0,
+      "timedOut": false,
+      "detail": "CLI acknowledged queue; receiver receipt still required"
+    },
+    "queueIds": [
+      "01a0802b-f6bf-7e51-9566-d145409e9fc5",
+      "01a0802b-f83a-7903-a20a-6f2455f62c51"
+    ],
+    "nextCursor": null
+  }
+}

@@ -150,3 +150,11 @@ workflow 继续上次任务，只把 Review 的思考强度提高到 xhigh。
 - 任何 hook 自身异常都静默 `exit 0`；只有明确 Haiku context/compaction 失败会有意 `decision:block`
 - `harvest` 第一件事读取 `stop_hook_active`；被它续起后的 Stop 只固化、不再次阻止
 - 跨轮次游标存 `os.tmpdir()`，因为 workflow 是后台任务，Stop 触发时文件可能还没落盘
+
+## Codex 主控与 Claude Code CLI 桥接（开发预览）
+
+新增 `node tools/session-bridge.mjs`：按原 Codex session ID 和工作区绑定任务，生成带 hash 的上下文，启动 Claude Code CLI 内的 Ultracode，终态经 Codex CLI queue 回原会话。业务完成、消息入队、主控收件与验收分别记录。深度链接用于定位会话。
+
+入口见 [Astra 主控操作说明](docs/codex-controller.md)、[命令与结果契约](skills/workflow-experience/references/session-bridge.md)；实施和真实联调进度见 [OpenSpec 任务](openspec/changes/add-codex-claude-session-bridge/tasks.md)。执行 `node tools/session-bridge.mjs doctor` 只读检查 CLI；`node tools/verify-all.mjs` 不调用模型。
+
+只有本次明确协作意图才启用；普通 workflow 保持默认。bridge 状态位于工作区 `.workflow-bridge/`，不会写回会话数据库。已验证真实 Ultracode 代码任务→Codex queue→原 Astra 会话验收、活跃 Claude 定向 relay、原 ID queue 状态矩阵、通知恢复，以及同一 Claude session 的受控串行 inbox。版本保持 0.5.0，未发布或重装。

@@ -1,0 +1,197 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-08T09:24:59.2614506Z",
+  "runtimeRoot": "C:\\windows\\TEMP\\workflow-bridge-inbox-352483c4-98d8-458c-895a-2a553d6285f5",
+  "worker": {
+    "provider": "claude",
+    "sessionId": "1fc15528-b75b-4fe7-85b3-d096b11d3546",
+    "displayName": "serial-inbox-1788858755677",
+    "cwd": "D:\\AI\\Skill\\Workflow-Exprience\\tmp\\bridge-inbox-live-4"
+  },
+  "initial": {
+    "first": {
+      "runnerStatus": "starting",
+      "runnerPid": 53640
+    },
+    "second": {
+      "runnerStatus": "queued",
+      "activeRequestId": "81cbeaa3-66e5-4349-a7bc-c5d145bd00b4",
+      "queuePosition": 1
+    }
+  },
+  "sequencing": {
+    "sameSessionId": true,
+    "first": {
+      "requestId": "81cbeaa3-66e5-4349-a7bc-c5d145bd00b4",
+      "runnerStartedAt": "2026-09-08T09:12:36.419Z",
+      "childStartedAt": "2026-09-08T09:12:37.08Z",
+      "lastHeartbeatAt": "2026-09-08T09:17:56.683Z",
+      "runnerStatus": "exited",
+      "childExitKnown": true,
+      "sessionBound": true,
+      "resumeRequested": false
+    },
+    "second": {
+      "requestId": "d4d5cc84-e775-47b7-8b42-8f16aaf4cdac",
+      "runnerStartedAt": "2026-09-08T09:17:59.813Z",
+      "childStartedAt": "2026-09-08T09:18:00.388Z",
+      "runnerStatus": "exited",
+      "childExitKnown": true,
+      "sessionBound": true,
+      "resumeRequested": true
+    },
+    "observedGapFromFirstLastHeartbeatToSecondRunnerStartMs": 3130,
+    "distinctWorkflowRuns": true
+  },
+  "first": {
+    "state": {
+      "schemaVersion": 1,
+      "requestId": "81cbeaa3-66e5-4349-a7bc-c5d145bd00b4",
+      "workStatus": "completed",
+      "deliveryStatus": "queued",
+      "controllerStatus": "awaiting-result",
+      "cancelRequested": false,
+      "createdAt": "2026-09-08T09:12:35.693Z",
+      "runnerStatus": "exited",
+      "launchToken": "9140f9d6-ab26-4ffd-a2f2-7434feec0093",
+      "resumeRequested": false,
+      "queuePosition": null,
+      "activeRequestId": "81cbeaa3-66e5-4349-a7bc-c5d145bd00b4",
+      "updatedAt": "2026-09-08T09:23:46.695Z",
+      "runnerPid": 53640,
+      "runnerStartedAt": "2026-09-08T09:12:36.419Z",
+      "childPid": 9880,
+      "childStartedAt": "2026-09-08T09:12:37.08Z",
+      "heartbeatAt": "2026-09-08T09:17:56.683Z",
+      "workflowRunId": "wf_fe46beb0-e6d",
+      "workflowFile": "C:\\Users\\loujiajie\\.claude\\projects\\D--AI-Skill-Workflow-Exprience-tmp-bridge-inbox-live-4\\1fc15528-b75b-4fe7-85b3-d096b11d3546\\workflows\\wf_fe46beb0-e6d.json",
+      "runVerification": "terminal-snapshot",
+      "terminalFingerprint": "5de5350fb0020b238fc99acd8056c132bc9b3092d429b5977dac49830271cbf3",
+      "messageId": "571c2b7de01adbef658bd14dbc9fd1e86bdd0d735a5be4f531a13cd139f9cf83",
+      "sessionBound": true,
+      "workerExitCode": 0,
+      "errorCode": null,
+      "childExitKnown": true
+    },
+    "result": {
+      "schemaVersion": 1,
+      "requestId": "81cbeaa3-66e5-4349-a7bc-c5d145bd00b4",
+      "workflowRunId": "wf_fe46beb0-e6d",
+      "scriptPath": "D:\\AI\\Skill\\Workflow-Exprience\\tmp\\bridge-inbox-live-4\\.workflow-bridge\\runs\\81cbeaa3-66e5-4349-a7bc-c5d145bd00b4\\workflow.js",
+      "terminalFingerprint": "5de5350fb0020b238fc99acd8056c132bc9b3092d429b5977dac49830271cbf3",
+      "workStatus": "completed",
+      "summary": "唯一的 Sonnet Workflow 子代理以只读方式读取 serial.cjs、serial.test.cjs、smoke.test.cjs，并成功运行 node --test smoke.test.cjs；Git HEAD 未变化，三个授权业务文件的 SHA-256 均与 request 上下文一致。",
+      "baselineHead": "46ad571472332d79761a93d9520109ab0119a765",
+      "currentHead": "46ad571472332d79761a93d9520109ab0119a765",
+      "completedTaskIds": [
+        "inbox.1"
+      ],
+      "remainingTaskIds": [],
+      "changedFiles": [],
+      "commits": [],
+      "tests": [
+        {
+          "command": "node --test smoke.test.cjs",
+          "cwd": "D:\\AI\\Skill\\Workflow-Exprience\\tmp\\bridge-inbox-live-4",
+          "exitCode": 0,
+          "evidence": "Workflow wf_fe46beb0-e6d：✔ smoke；tests 1，pass 1，fail 0，duration_ms 82.5155"
+        }
+      ],
+      "blockers": [],
+      "nextActions": [],
+      "sourceRefs": [
+        "workflow:wf_fe46beb0-e6d",
+        "C:\\Users\\loujiajie\\.claude\\projects\\D--AI-Skill-Workflow-Exprience-tmp-bridge-inbox-live-4\\1fc15528-b75b-4fe7-85b3-d096b11d3546\\workflows\\wf_fe46beb0-e6d.json",
+        ".workflow-bridge/runs/81cbeaa3-66e5-4349-a7bc-c5d145bd00b4/context.json"
+      ]
+    }
+  },
+  "second": {
+    "state": {
+      "schemaVersion": 1,
+      "requestId": "d4d5cc84-e775-47b7-8b42-8f16aaf4cdac",
+      "workStatus": "completed",
+      "deliveryStatus": "queued",
+      "controllerStatus": "awaiting-result",
+      "cancelRequested": false,
+      "createdAt": "2026-09-08T09:12:35.719Z",
+      "runnerStatus": "exited",
+      "queuePosition": null,
+      "activeRequestId": "d4d5cc84-e775-47b7-8b42-8f16aaf4cdac",
+      "updatedAt": "2026-09-08T09:23:46.801Z",
+      "launchToken": "8295f83f-c7fd-4698-b6cf-4477ab8ed54b",
+      "resumeRequested": true,
+      "runnerPid": 17556,
+      "runnerStartedAt": "2026-09-08T09:17:59.813Z",
+      "childPid": 6136,
+      "childStartedAt": "2026-09-08T09:18:00.388Z",
+      "heartbeatAt": "2026-09-08T09:23:20.097Z",
+      "workflowRunId": "wf_b28fb5b6-379",
+      "workflowFile": "C:\\Users\\loujiajie\\.claude\\projects\\D--AI-Skill-Workflow-Exprience-tmp-bridge-inbox-live-4\\1fc15528-b75b-4fe7-85b3-d096b11d3546\\workflows\\wf_b28fb5b6-379.json",
+      "runVerification": "terminal-snapshot",
+      "terminalFingerprint": "80e8dbf50e62037131b4ba3e5637abb38f76f1996871b956b078610988868fb0",
+      "messageId": "8011158296be291540c5fa5ba9c781e756b41ad0c542c0398eb002a419167587",
+      "errorCode": null,
+      "sessionBound": true,
+      "workerExitCode": 0,
+      "childExitKnown": true
+    },
+    "result": {
+      "schemaVersion": 1,
+      "requestId": "d4d5cc84-e775-47b7-8b42-8f16aaf4cdac",
+      "workflowRunId": "wf_b28fb5b6-379",
+      "scriptPath": "C:\\Users\\loujiajie\\.claude\\projects\\D--AI-Skill-Workflow-Exprience-tmp-bridge-inbox-live-4\\1fc15528-b75b-4fe7-85b3-d096b11d3546\\workflows\\scripts\\serial-inbox-second-probe-wf_b28fb5b6-379.js",
+      "terminalFingerprint": "80e8dbf50e62037131b4ba3e5637abb38f76f1996871b956b078610988868fb0",
+      "workStatus": "completed",
+      "summary": "新的单代理 Sonnet Workflow 将 serial.cjs 的返回值从 1 改为 2，并成功运行 node --test serial.test.cjs；Git HEAD 未变化，无授权范围外的非忽略修改。",
+      "baselineHead": "46ad571472332d79761a93d9520109ab0119a765",
+      "currentHead": "46ad571472332d79761a93d9520109ab0119a765",
+      "completedTaskIds": [
+        "inbox.2"
+      ],
+      "remainingTaskIds": [],
+      "changedFiles": [
+        "serial.cjs"
+      ],
+      "commits": [],
+      "tests": [
+        {
+          "command": "node --test serial.test.cjs",
+          "cwd": "D:\\AI\\Skill\\Workflow-Exprience\\tmp\\bridge-inbox-live-4",
+          "exitCode": 0,
+          "evidence": "Workflow wf_b28fb5b6-379：✔ serial；tests 1；pass 1；fail 0；duration_ms 80.1689；__EXIT_CODE__=0"
+        }
+      ],
+      "blockers": [],
+      "nextActions": [],
+      "sourceRefs": [
+        "workflow:wf_b28fb5b6-379",
+        "C:\\Users\\loujiajie\\.claude\\projects\\D--AI-Skill-Workflow-Exprience-tmp-bridge-inbox-live-4\\1fc15528-b75b-4fe7-85b3-d096b11d3546\\workflows\\wf_b28fb5b6-379.json",
+        "serial.cjs:1",
+        ".workflow-bridge/runs/d4d5cc84-e775-47b7-8b42-8f16aaf4cdac/context.json"
+      ]
+    }
+  },
+  "git": {
+    "head": "46ad571472332d79761a93d9520109ab0119a765",
+    "baselineHead": "46ad571472332d79761a93d9520109ab0119a765",
+    "businessDiff": "diff --git a/serial.cjs b/serial.cjs\nindex 4e62402..ef04f8a 100644\n--- a/serial.cjs\n+++ b/serial.cjs\n@@ -1 +1 @@\n-module.exports = () => 1\n+module.exports = () => 2",
+    "focusedTest": {
+      "command": "node --test serial.test.cjs",
+      "exitCode": 0,
+      "summary": "tests 1, pass 1, fail 0"
+    },
+    "rawStatus": " M serial.cjs\n?? .claude/progress/1fc15528-b75b-4fe7-85b3-d096b11d3546.jsonl\n?? docs/ultracode/index.jsonl\n?? docs/ultracode/raw/wf_b28fb5b6-379.json\n?? docs/ultracode/raw/wf_fe46beb0-e6d.json\n?? docs/ultracode/state/5c63baab37c0acafe1cba954.json",
+    "ignoredStatePrefixes": [
+      ".claude/progress/",
+      "docs/ultracode/",
+      ".workflow-bridge/"
+    ]
+  },
+  "implementationCorrection": {
+    "observed": "两个真实 result 已先完成，但探针加载的旧 runner 分支随后把 state 暂时覆盖为 workflow-result-uninterpretable。",
+    "fixed": "worker.cjs 现在在 result.json 已存在时保留已验证终态；engine.cjs 的幂等 complete 清除 completed 的陈旧 errorCode。",
+    "recovery": "未重跑 Workflow 或业务测试；对两个既有 result.json 执行幂等 complete 后恢复 final state。",
+    "offlineRegression": "外层已 complete 的终态不被 runner 覆盖：PASS"
+  }
+}

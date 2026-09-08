@@ -7,10 +7,16 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+function scriptsBelow(relative) {
+  return fs.readdirSync(path.join(root, relative), { withFileTypes: true }).flatMap(e =>
+    e.isDirectory() ? scriptsBelow(`${relative}/${e.name}`) : /\.(?:cjs|mjs)$/.test(e.name) ? [`${relative}/${e.name}`] : [])
+}
 const syntaxFiles = [
   ...fs.readdirSync(path.join(root, 'hooks')).filter(f => f.endsWith('.cjs')).map(f => `hooks/${f}`),
   ...fs.readdirSync(path.join(root, 'templates')).filter(f => f.endsWith('.js')).map(f => `templates/${f}`),
   ...fs.readdirSync(path.join(root, 'tools')).filter(f => f.endsWith('.mjs') && f !== 'verify-all.mjs').map(f => `tools/${f}`),
+  ...scriptsBelow('bridge'),
+  ...scriptsBelow('tools/fixtures/session-bridge'),
 ]
 
 JSON.parse(fs.readFileSync(path.join(root, '.claude-plugin/plugin.json'), 'utf8'))
@@ -25,9 +31,10 @@ for (const relative of [
   'tools/verify-state-pipeline.mjs',
   'tools/verify-model-fallback.mjs',
   'tools/verify-effort-routing.mjs',
+  'tools/verify-session-bridge.mjs',
 ]) {
   console.log(`\n[verify-all] ${relative}`)
   execFileSync(process.execPath, [path.join(root, relative)], { stdio: 'inherit' })
 }
 
-console.log(`\n离线验收全部通过：manifest JSON + SKILL ${skillLength}/7000 字符 + ${syntaxFiles.length} 个语法检查 + 3 组行为验证`)
+console.log(`\n离线验收全部通过：manifest JSON + SKILL ${skillLength}/7000 字符 + ${syntaxFiles.length} 个语法检查 + 4 组行为验证`)

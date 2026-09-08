@@ -18,6 +18,8 @@ OpenSpec-first 时：
 
 若需求明确包含“审阅使用 Codex CLI”或“修改代码使用 Codex CLI”等指令，按 `references/codex-cli.md` 只覆盖对应阶段；否则保持默认 `fable` Review/Audit 与现有动态模型路由。
 
+若用户明确要求 Codex 与 Claude Code **CLI** 交接/回传，先 Read `references/session-bridge.md`，由外层建立独立 request 并准备上下文，显式调用 authoring/Workflow；终态外层 complete/drain。只读旧会话、引用示例、否定通知、仅 Codex 审阅不得启用。恢复仅延续同 request/scope 的原始授权，用户撤销优先；通信字段不进入 Workflow args/BasePlan。
+
 若用户指定模型或阶段的思考强度，把意图写进 workflow args：逻辑别名使用 `modelEfforts`，阶段/角色使用 `phaseEfforts`。允许值为 `low/medium/high/xhigh/max`，阶段覆盖优先于逻辑模型覆盖，未指定项保持模板原默认；`null` 表示恢复该调用点默认。Reviewer、Advisor、Audit 使用各自键。遇到未知键或无效值必须在派发前报错，不能静默忽略。示例：`{modelEfforts:{opus:'max'},phaseEfforts:{Implement:'high',Review:'xhigh'}}`。
 
 需求：$ARGUMENTS

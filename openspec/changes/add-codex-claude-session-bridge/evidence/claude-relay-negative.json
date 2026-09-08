@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-08T09:01:17.994Z",
+  "target": "bridge-absent-4f8c0bf0",
+  "requestedMessage": "relay-negative-probe",
+  "exitCode": 0,
+  "timedOut": false,
+  "call": {
+    "name": "SendMessage",
+    "to": "bridge-absent-4f8c0bf0",
+    "messageMatches": true
+  },
+  "toolResult": {
+    "isError": false,
+    "text": "{\"success\":false,\"message\":\"No agent named 'bridge-absent-4f8c0bf0' is reachable.\\nUse ListAgents to see everyone you can message.\"}"
+  },
+  "mappedStatus": "refused"
+}

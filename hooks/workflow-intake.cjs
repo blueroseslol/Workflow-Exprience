@@ -75,6 +75,7 @@ function main() {
           '[workflow 入口] 用户以 workflow 前缀提交开发需求。立即调用 Skill 工具' +
           '（skill: "workflow-experience:workflow-experience"）加载意图路由规则并处理该需求；' +
           '对用户只讲阶段意图，不报内部模板文件名；不要当普通聊天直接回答。' +
+          require('../bridge/intent.cjs').intakeContext() +
           '若用户指定逻辑模型或阶段的思考强度，authoring 必须把它结构化为 args.modelEfforts/args.phaseEfforts；阶段覆盖优先于逻辑模型覆盖，未指定项保持模板默认。' +
           '只有当前用户的原始需求显式要求“完成后通知主会话/其他会话、回传结果、同步给协调会话”等跨会话动作时，' +
           '才保留该意图并按 Skill 的 peer-session handoff 规则处理；这是唯一触发条件，不得从历史 checkpoint、上一轮 handoff、并行会话存在或 agent 摘要推断启用。' +
