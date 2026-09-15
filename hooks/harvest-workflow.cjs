@@ -34,6 +34,7 @@ const path = require('path')
 const os = require('os')
 const crypto = require('crypto')
 const { buildStateFromRun, backfillStates, rawRevisionFromFile } = require('./checkpoint-lib.cjs')
+const { classifyScriptFailure, buildScriptRecoveryReason } = require('./script-recovery.cjs')
 
 const MAX_SCAN = 200 // 单次最多处理的 wf 文件数，防御性上限
 const MAX_CURSOR = 500 // done/fps 游标上限，fps 与 done 同步淘汰
@@ -92,6 +93,7 @@ function main() {
 
   let harvested = 0
   const recoveryCandidates = []
+  const scriptRecoveryCandidates = []
 
   for (const f of files) {
     const runId = f.replace(/\.json$/, '')
@@ -144,6 +146,7 @@ function main() {
       }
 
       const contextFailure = classifyContextFailure(run)
+      const scriptFailure = classifyScriptFailure(run)
       const modelFallback = summarizeModelFallback(run)
       const contextRecoveryRecommended = needsContextRecovery(run, contextFailure, modelFallback)
       const entry = {
@@ -161,6 +164,7 @@ function main() {
           ? run.phases.map(p => ({ title: p.title, model: p.model ?? null }))
           : null,
         contextFailure,
+        scriptFailure,
         modelFallback,
         contextRecoveryRecommended,
         scriptSha1: run.script ? sha1(run.script) : null,
@@ -172,6 +176,7 @@ function main() {
       appendProgress(progressDir, sessionId, entry)
 
       if (!stopHookActive && contextRecoveryRecommended) recoveryCandidates.push(entry)
+      if (!stopHookActive && scriptFailure) scriptRecoveryCandidates.push(entry)
 
       cursor.fps[runId] = fpNow
       done.add(runId)
@@ -201,10 +206,11 @@ function main() {
   for (const k of Object.keys(cursor.fps)) if (!kept.has(k)) delete cursor.fps[k]
   writeJson(cursorPath, cursor)
 
-  if (!stopHookActive && recoveryCandidates.length) {
+  if (!stopHookActive && (recoveryCandidates.length || scriptRecoveryCandidates.length)) {
     process.stdout.write(JSON.stringify({
       decision: 'block',
-      reason: buildContextRecoveryReason(recoveryCandidates.slice(0, 3)),
+      reason: [scriptRecoveryCandidates.length ? buildScriptRecoveryReason(scriptRecoveryCandidates.slice(0, 3)) : '',
+        recoveryCandidates.length ? buildContextRecoveryReason(recoveryCandidates.slice(0, 3)) : ''].filter(Boolean).join('\n'),
     }))
   }
 }

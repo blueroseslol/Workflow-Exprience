@@ -3,6 +3,8 @@
 **日期**：2026-09-01
 **状态**：已采纳
 
+> 2026-09-14 更新：本文的 Teammate/邮箱等 API 描述属于历史版本。当前 CLI 2.1.260 与官方文档的核对结果、Reviewer 自修和受控讨论见 [最新说明](../workflow-review-repair.md)。本次仍由 Workflow 脚本协调讨论；没有实现原生 Agent Teams 适配器。
+
 ## 背景
 
 用户要求"添加 TeamAgent 以及 advisor 说明，让 Sonnet 遇到问题时使用 advisor（次数可通过 ultracode 变量修改，默认最高 5 次）"。

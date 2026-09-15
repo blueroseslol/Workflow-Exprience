@@ -49,7 +49,7 @@ class Store {
   run(requestId, file = 'request.json') { ensure(id(requestId) && /^[a-zA-Z0-9._-]+$/.test(file), 'invalid-reference', '无效运行文件名'); return `runs/${requestId}/${file}` }
   runtimeFile(p) { return safePath(this.runtimeRoot, p) }
   lockFile(key) {
-    const base = /^(?:session|scheduler):/.test(key) ? this.runtimeRoot : safePath(this.cwd, '.workflow-bridge')
+    const base = /^(?:session|scheduler|channel):/.test(key) ? this.runtimeRoot : safePath(this.cwd, '.workflow-bridge')
     return safePath(base, `locks/${hash(key)}.lock/owner.json`)
   }
   lock(key) {

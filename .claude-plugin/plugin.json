@@ -1,6 +1,7 @@
 {
   "name": "workflow-experience",
-  "version": "0.5.0",
-  "description": "Ultracode workflow 经验库：OpenSpec-first 增量规划 + GitNexus 动态路由 + 可恢复的模型/阶段 effort 覆盖（v0.5.0）",
+  "channels": [{ "server": "workflow-bridge" }],
+  "version": "0.5.2",
+  "description": "Ultracode workflow 经验库：Reviewer 自修、脚本预检、失败阶段恢复、真实验证门禁与 Claude Channel 双向回执（v0.5.2）",
   "author": { "name": "loujiajie" }
 }

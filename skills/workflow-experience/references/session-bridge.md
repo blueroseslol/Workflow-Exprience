@@ -10,6 +10,10 @@ Claude 端是 `claude` 命令行程序，Ultracode 在它的主会话内运行�
 
 ## 运行前
 
+活跃会话优先用 `control.workerTransport:"channel"`，接入步骤见 `docs/claude-channel.md`。目标首次调用 `bridge_connect`；收到 Channel 后先 `bridge_ack(requestId,messageId,sha256)`，仅 `execute:true` 才执行本次请求。重复 ACK 不重跑，未 ACK 不得启动/attach Workflow。需要拒绝尚未 ACK 的请求时用 `bridge_reject` 并给出原因；已经 ACK 的任务必须检查实际 Workflow。Channel 身份由当前 MCP 连接绑定，不从消息选择会话。
+
+Channel 的外层主会话使用 `bridge_attach_run` 绑定真实 run，终态将 Result v1 写入 request 同目录 `candidate-result.json` 后调用 `bridge_complete`，插件验证并自动回传；后台收集同一候选文件作为兜底。普通 Markdown 不代替 Result v1。通知失败查看 deliveryErrorCode/diagnostic，仅 `bridge_drain` 补通知。不得让 Workflow Report 子代理直接调用 codex queue 或自行拼接 spawn 命令；其职责是把前序真实阶段结果汇总完整，外层负责身份与通信。
+
 CLI 入口为插件根目录 `tools/session-bridge.mjs`，共享代码为 `bridge/`，必须随插件一起存在。所有路径使用绝对路径；Windows 传字符串数组，不能把消息拼接成 shell 程序。
 
 1. 主控按 `docs/codex-controller.md` 建立 request、bind、export-context。
@@ -71,7 +75,7 @@ Workflow 自身的最终 return 对象必须有顶层 `status`，值为 `complet
 - 普通 worker 默认不改模型；显式 `control.workerModel` 才覆盖。模型不可用/403 交给用户修复通道，不自动改全局配置或路由。
 - `dispatch` 新建 worker 需要 allowCreateWorker。同一 request 只允许在尚未进入 Workflow 时恢复；新切片用新的 requestId 和 `resumeFromRequestId` 引用已确认终态的前序 request。
 - 同一 Claude session 已有受控 worker 时，新切片进入持久 inbox，等前一 runner 与子进程退出并释放 lease 后以原 session ID 串行 resume；队列项必须明确引用当前 active request。跨 worktree、身份漂移或所有权不明时阻塞，不启动第二个 writer。
-- 已有活跃 CLI 目标选择 `control.workerTransport:"relay"`，提供固定 ID、已解析 displayName 和 maxBudgetUsd。relay 多一次模型调用，工具不足/拒绝/无可信回执如实报告。
+- 已有活跃 CLI 优先选择 `channel` 并确认目标接入；`status.receiptConfirmed` 只在目标 ACK 后为真。离线持久入队，超时/断线不自动重发。兼容 `relay` 需显式选择，提供固定 ID、已解析 displayName 和 maxBudgetUsd；它多一次模型调用，发送成功仍不能证明目标收到。
 - queue 在本机已验证输出 `Queued message ... for thread ...`；它不保证空闲目标立即运行。主控下一次消费消息时 receive；不得把 queued 报成 accepted。
 - 发送后崩溃为 delivery-unknown。先在目标核对 messageId 并 receive；没有依据不要重复发送。
 - Windows 的只读 history 使用 stdio App Server。其 notLoaded/idle 不证明外部会话空闲，不能据此强行 resume。

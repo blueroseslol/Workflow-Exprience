@@ -1,5 +1,7 @@
 # Claude Code `workflow-experience` 插件：Workflow 阶段、判断与缓存复用
 
+> v0.5.1 更新：下文流程图保留历史阶段设计；当前两条开发主模板的 Review 已改为自修/受控讨论并独立复审，Verify 有有限 Repair，默认不 Commit。脚本预检及失败恢复的当前契约见 [最新说明](workflow-review-repair.md)。
+
 > 适用版本：`workflow-experience` v0.4.4（仓库提交 `067da2b89b4adc10b5a3475d168594c29f1f0a4d`）<br>
 > 本文描述的是当前源码行为。图中的“缓存命中”均受兼容性、指纹和风险门禁约束，不代表仅凭旧聊天或旧结果即可复用。
 

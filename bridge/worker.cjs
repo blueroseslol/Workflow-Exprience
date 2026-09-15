@@ -49,6 +49,7 @@ function dispatch(store, requestId, options = {}) {
 }
 function attachRun(store, requestId, runId, options = {}) {
   const r = E.load(store, requestId); E.assertActive(store, r)
+  if (r.control.workerTransport === 'channel') C.ensure(E.state(store, requestId).workerReceipt, 'receipt-required', 'Channel 必须先由目标会话 bridge_ack 再启动并绑定 Workflow')
   C.ensure(C.id(runId) && runId.startsWith('wf_'), 'invalid-reference', '需要真实 Workflow run ID')
   let record
   try { record = workflow.readRun(r, runId, options) } catch (e) { if (!['workflow-unavailable', 'ENOENT', 'missing-path'].includes(e.code)) throw e }

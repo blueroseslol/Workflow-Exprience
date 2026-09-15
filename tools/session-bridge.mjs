@@ -10,6 +10,7 @@ const worker = require('../bridge/worker.cjs')
 const workflow = require('../bridge/workflow.cjs')
 const P = require('../bridge/process.cjs')
 const claude = require('../bridge/adapters/claude.cjs')
+const channel = require('../bridge/channel.cjs')
 const { validateDecision } = require('../bridge/intent.cjs')
 const COMMANDS = ['help', 'doctor', 'bind', 'export-context', 'dispatch', 'complete', 'drain', 'send', 'receive', 'status', 'cancel', 'attach-run', 'inspect-run', 'acknowledge', 'resolve-target', 'validate-intent', 'retry-delivery', 'reconcile']
 export function parseArgs(argv) {
@@ -65,10 +66,14 @@ export async function main(argv) {
   if (o['request-file']) { const requested = readJson(o['request-file']); requestId ||= requested.requestId; C.ensure(requestId === requested.requestId, 'identity-mismatch', 'request 参数冲突') }
   if (o['message-file']) { const value = readJson(o['message-file']); const message = value.message || value; requestId ||= message.requestId; const r = E.load(store, requestId); C.validateMessage(message, r); C.ensure(message.messageId === E.state(store, requestId).messageId, 'identity-mismatch', '不是本任务待发送消息') }
   C.ensure(C.id(requestId), 'usage', '需要 --request-id 或 --request-file')
-  if (command === 'status') { E.load(store, requestId, { allowExpired: true }); return E.state(store, requestId) }
+  if (command === 'status') { E.load(store, requestId, { allowExpired: true }); return channel.status(store, requestId) }
   if (command === 'export-context') return E.exportContext(store, requestId, { readHistory: o['read-history'], bundleFile: o['bundle-file'] })
   if (command === 'dispatch') {
     const r = E.load(store, requestId)
+    if (r.control.workerTransport === 'channel') {
+      C.ensure(!o.resume, 'usage', 'channel 不支持 --resume')
+      return channel.dispatch(store, requestId, { dryRun: o['dry-run'] })
+    }
     return r.control.workerTransport === 'relay' ? worker.dispatchRelay(store, requestId, { dryRun: o['dry-run'] }) : worker.dispatch(store, requestId, { dryRun: o['dry-run'], resume: o.resume })
   }
   if (command === 'complete') return worker.completeVerified(store, requestId, readJson(o['result-file']))

@@ -16,9 +16,14 @@ function resolveExecutable(name, { env = process.env, platform = process.platfor
     if (!fs.existsSync(shim)) continue
     // Only resolve npm's fixed executable target; never interpret the batch program.
     const contents = fs.readFileSync(shim, 'utf8')
-    const match = contents.match(/"%dp0%[\\/]([^"\r\n]+\.(?:exe|[cm]?js))"/i)
-    if (!match || match[1].includes('%') || !match[1].startsWith('node_modules')) continue
+    // npm shims mention "%dp0%\\node.exe" BEFORE their actual package entry.
+    // Match the package entry specifically, otherwise every ordinary npm shim
+    // is skipped and a different CLI later in PATH may be selected instead.
+    const match = contents.match(/"%dp0%[\\/](node_modules[\\/][^"\r\n]+\.(?:exe|[cm]?js))"/i)
+    if (!match || match[1].includes('%')) continue
     const target = path.resolve(dir, match[1])
+    const relative = path.relative(path.resolve(dir, 'node_modules'), target)
+    if (relative.startsWith('..') || path.isAbsolute(relative)) continue
     if (!fs.existsSync(target)) continue
     if (/\.exe$/i.test(target)) return { executable: target, prefix: [] }
     return { executable: process.execPath, prefix: [target] }
@@ -49,7 +54,7 @@ function run(command, args, { cwd, stdin = '', timeoutMs = 30000, maxBytes = 2 *
       }
     })
     child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-32768) })
-    child.on('error', e => { clearTimeout(timer); reject(e) })
+    child.on('error', e => { clearTimeout(timer); e.beforeSubmission = !child.pid; reject(e) })
     child.on('close', (exitCode, signal) => { clearTimeout(timer); stdout += decoder.end(); resolve({ exitCode, signal, stdout, stderr, timedOut, overflow }) })
     child.stdin.on('error', () => {})
     child.stdin.end(stdin)

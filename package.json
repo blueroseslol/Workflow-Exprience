@@ -1,0 +1,15 @@
+{
+  "name": "workflow-experience-checks",
+  "private": true,
+  "scripts": {
+    "build:channel-sdk": "node tools/build-channel-sdk.mjs",
+    "test": "node tools/verify-all.mjs",
+    "build:preflight": "esbuild tools/workflow-static.cjs --bundle --platform=node --format=cjs --minify --legal-comments=eof --outfile=hooks/vendor/workflow-static.cjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "acorn": "8.15.0",
+    "esbuild": "0.25.10",
+    "eslint-scope": "8.4.0"
+  }
+}

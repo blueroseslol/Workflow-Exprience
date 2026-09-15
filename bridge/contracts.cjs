@@ -80,7 +80,9 @@ function validateRequest(r, { checkExpiry = true } = {}) {
   ensure(r.notify?.when === 'terminal' && typeof r.notify.required === 'boolean', 'invalid-contract', 'notify 必须声明终态策略')
   ensure(['queue', 'resume'].includes(r.notify.transport), 'unsupported', '未知 Codex transport')
   ensure(r.control?.mode === 'supervised' && Number.isInteger(r.control.maxRevisionRounds) && r.control.maxRevisionRounds >= 0 && r.control.maxRevisionRounds <= 2, 'invalid-contract', '返工上限必须为 0..2')
-  ensure(r.control.workerTransport == null || ['worker', 'relay'].includes(r.control.workerTransport), 'unsupported', '未知 Claude transport')
+  ensure(r.control.workerTransport == null || ['worker', 'relay', 'channel'].includes(r.control.workerTransport), 'unsupported', '未知 Claude transport')
+  if (r.control.receiptTimeoutMs != null) ensure(Number.isInteger(r.control.receiptTimeoutMs) && r.control.receiptTimeoutMs >= 1000 && r.control.receiptTimeoutMs <= 3600000, 'invalid-contract', 'receiptTimeoutMs 必须为 1秒..1小时')
+  if (r.control.workerTransport === 'channel') ensure(r.control.allowCreateWorker !== true && !r.control.resumeFromRequestId, 'invalid-contract', 'channel 只连接既有会话，不创建或 resume worker')
   if (r.control.resumeFromRequestId != null) ensure(id(r.control.resumeFromRequestId) && r.control.resumeFromRequestId !== r.requestId, 'invalid-reference', 'resumeFromRequestId 必须引用另一个明确 request')
   for (const date of [r.control.requestExpiry, r.notify.deadlineAt]) {
     ensure(Number.isFinite(Date.parse(date)), 'invalid-contract', '必须指定有效截止时间')

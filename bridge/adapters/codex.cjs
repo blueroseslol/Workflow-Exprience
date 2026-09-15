@@ -1,5 +1,5 @@
 'use strict'
-const { spawnCommand, run } = require('../process.cjs')
+const { spawnCommand, run, resolveExecutable } = require('../process.cjs')
 const { ensure, samePath, real, fail } = require('../contracts.cjs')
 const { StringDecoder } = require('node:string_decoder')
 const READ_METHODS = new Set(['thread/read', 'thread/list', 'thread/turns/list', 'thread/items/list', 'thread/queue/list'])
@@ -80,16 +80,34 @@ async function history(endpoint, options = {}) {
 async function queue(endpoint, message, options = {}) {
   ensure(Buffer.byteLength(message) <= 4096, 'context-too-large', '通知正文必须小于 4 KiB')
   const exec = options.run || run
+  let command = options.command
   try {
-    const check = await exec(options.command || 'codex', ['queue', '--help'], { cwd: endpoint.cwd })
-    ensure(check.exitCode === 0 && /--thread/.test(check.stdout) && /--message/.test(check.stdout), 'unsupported', 'Codex queue 不可用')
-    await (options.metadata || metadata)(endpoint, { command: options.command })
-  } catch (e) { e.beforeSubmission = true; throw e }
-  const result = await exec(options.command || 'codex', ['queue', '--thread', endpoint.sessionId, '--message', message, '-C', endpoint.cwd], { cwd: endpoint.cwd, timeoutMs: 20000 })
+    command ||= options.run ? 'codex' : resolveExecutable('codex')
+    const check = await exec(command, ['queue', '--help'], { cwd: endpoint.cwd })
+    if (check.exitCode !== 0 || !/--thread/.test(check.stdout) || !/--message/.test(check.stdout)) {
+      const e = Object.assign(new Error('Codex queue 不可用'), { code: 'unsupported', diagnostic: queueDiagnostic(check, 'preflight') }); throw e
+    }
+    await (options.metadata || metadata)(endpoint, { command })
+  } catch (e) { e.beforeSubmission = true; e.diagnostic ||= { phase: 'preflight', errorCode: e.code || 'queue-preflight-failed' }; throw e }
+  let result
+  try {
+    result = await exec(command, ['queue', '--thread', endpoint.sessionId, '--message', message, '-C', endpoint.cwd], { cwd: endpoint.cwd, timeoutMs: 20000 })
+  } catch (e) {
+    e.diagnostic = { phase: e.beforeSubmission ? 'spawn' : 'submission', errorCode: e.code || 'queue-process-error' }
+    throw e
+  }
   // Only known queue acknowledgment text is treated as queued. A zero exit alone is unknown.
   const acknowledgment = result.stdout.trim().match(/^Queued message ([a-zA-Z0-9_-]+) for thread ([a-zA-Z0-9_-]+)\.$/)
   const queued = result.exitCode === 0 && acknowledgment?.[2] === endpoint.sessionId && !result.timedOut && !result.overflow
-  return { deliveryStatus: queued ? 'queued' : 'delivery-unknown', transportMessageId: queued ? acknowledgment[1] : null, exitCode: result.exitCode, timedOut: result.timedOut, detail: queued ? 'CLI acknowledged queue; receiver receipt still required' : 'CLI did not provide a verified queue acknowledgment' }
+  const errorCode = queued ? null : result.timedOut ? 'queue-timeout' : result.overflow ? 'queue-output-limit' : result.exitCode !== 0 ? 'queue-exit-nonzero' : 'queue-ack-unverified'
+  return { deliveryStatus: queued ? 'queued' : 'delivery-unknown', transportMessageId: queued ? acknowledgment[1] : null, exitCode: result.exitCode, timedOut: result.timedOut, errorCode, diagnostic: queued ? null : queueDiagnostic(result, 'submission'), executable: typeof command === 'object' ? command : null, detail: queued ? 'CLI acknowledged queue; receiver receipt still required' : 'CLI did not provide a verified queue acknowledgment; inspect diagnostic, do not blindly resend' }
+}
+function queueDiagnostic(result, phase) {
+  const clean = value => require('../context.cjs').redact(String(value || ''))
+    .replace(/((?:["']?(?:[\w-]*(?:token|secret|password|api[_-]?key)|authorization)["']?)\s*[:=]\s*)["'][^"'\r\n]*["']/gi, '$1"[REDACTED]"')
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[REDACTED]@')
+    .slice(0, 4096)
+  return { phase, exitCode: result.exitCode ?? null, signal: result.signal || null, stderr: clean(result.stderr), stdout: clean(result.stdout), timedOut: !!result.timedOut, overflow: !!result.overflow }
 }
 async function resume(endpoint, message, options = {}) {
   try {

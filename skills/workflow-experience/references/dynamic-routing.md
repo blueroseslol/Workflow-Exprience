@@ -89,13 +89,13 @@ esc((partial || truncated) && publicApi,        'CRITICAL',  'partial/truncated 
 const plannerModel        = (route==='HIGH'||route==='CRITICAL') ? 'opus' : 'sonnet'
 const implementationModel = route==='CRITICAL' ? 'opus' : 'sonnet'
 const reviewModel         = 'fable'
-const needsReview         = ALWAYS_REVIEW || route !== 'LOW'
+const needsReview         = decideReview(args, recon, plan, route).required // Planner assessment + 硬风险门
 ```
 
 | 路由 | Recon | Plan | Review | Implement | Verify | Final Audit |
 |---|---|---|---|---|---|---|
-| **LOW** | haiku | sonnet | （跳过，除非 alwaysReview） | sonnet | haiku（只验证） | routeMiss 时触发 fable |
-| **MEDIUM** | haiku | sonnet | fable | sonnet | haiku（只验证） | routeMiss 时触发 fable |
+| **LOW** | haiku | sonnet | （满足低风险证据才跳过） | sonnet | haiku（只验证） | routeMiss 时触发 fable |
+| **MEDIUM** | haiku | sonnet | 按 reviewAssessment / 硬风险决定 | sonnet | haiku（只验证） | routeMiss 时触发 fable |
 | **HIGH** | haiku | opus | fable | sonnet | haiku（只验证） | routeMiss 时触发 fable |
 | **CRITICAL** | haiku | opus | fable（对抗） | opus | haiku（只验证） | fable（必跑） |
 
@@ -104,7 +104,7 @@ const needsReview         = ALWAYS_REVIEW || route !== 'LOW'
 
 LOW 默认跳过 Sol Review 是**可配置策略**，不是硬编码：
 ```js
-const ALWAYS_REVIEW = args?.alwaysReview ?? false   // true → LOW 也过 Review
+const REVIEW_MODE = args?.reviewMode ?? 'auto' // always 全审；兼容 alwaysReview=true
 ```
 
 ---
@@ -128,7 +128,7 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 | 闸门 | 位置 | 行为 |
 |---|---|---|
 | **Plan Risk Gate** | Plan 后 | `plan.predictedImpact.risk` 高于冻结 route → 早退 `route-escalation-required` 并带 `nextArgs.minRoute=<更高等级>`。主 agent **同 session 直接 resume**（`resumeFromRunId` + 首轮 args 全量叠加 nextArgs）：Recon 命中缓存，minRoute 给路由兜底使**升级粘滞、不会在 Recon 处回落**（否则 Recon 重判 LOW → Plan 再判 HIGH → 死循环）；缓存失效两条腿——跨档（LOW/MEDIUM↔HIGH/CRITICAL）时 plannerModel 变（model 进缓存键），同档（LOW→MEDIUM、HIGH→CRITICAL）时靠 Plan prompt 内嵌的 route 等级变化（prompt 进缓存键），任一都使 Plan 及之后重跑。已跨 session 才开新 workflow（checkpoint）。不因风险评分在当前 run 中途换模型；终态 Haiku 上下文故障由 Stop/harvest 精确分类后续起一次 Sonnet 恢复，不改变冻结 route。 |
-| **Review 门** | Review 后 | `revise` → 早退 `replan-required`（实现者被旧 whitelist 锁死，无法合法吸收 reviewer 发现的过窄问题）；`block` → `blocked` |
+| **Review 门** | Review 后 | 局部 `revise` → 直接 revisedPlan → JS 检查 → 独立复审；复杂分歧进入提案/质疑/汇总；默认最多 2 轮。`block` → `blocked`，详见 review-repair.md |
 | **Preflight 门** | Preflight 后 | **fail-closed**：`!pre`（agent 未返回）也算失败 → `failed`；`!pre.ready` → `blocked`。不再静默放行 |
 | **Implement 门** | Implement 后 | `!impl \|\| !impl.done` → 早退 `escalate`，避免「没实现完但旧测试全绿被提交」 |
 | **Commit Gate** | Audit 后 | 仅 `verify green 且 (无 audit 或 audit=accept) 且 requireCommit` 才放行提交。该提交却没提交成（commitResult.committed=false）→ `status='commit-failed'`，不落 green。最终 status 吸收 audit verdict |
@@ -144,14 +144,14 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 
 ## 五·再补、Implement Advisor Escalation
 
-默认实现仍由路由派生模型负责；**HIGH 也不是自动问顾问**。只有实现者已经亲自读码/取证，并遇到无法安全继续的高风险疑难点时，才允许调用 `fable` 只读顾问。
+默认实现仍由路由派生模型负责；**HIGH 也不是自动问顾问**。只有实现者已经亲自读码/取证，并遇到无法安全继续的高风险疑难点时，才允许调用 Agent 选择的 `fable` / `opus` 只读顾问。
 
 推荐链：
 
 ```text
 Sonnet Implement
   → 普通问题自己解决
-  → 有证据的疑难点 → Fable Advisor
+  → 有证据的疑难点 → 按需 Fable/Opus Advisor
   → continue/change-approach → 当前实现角色继续
   → replan → 复用 replanFeedback/replanAttempt
   → stop-and-ask → need-decision
@@ -165,13 +165,15 @@ Sonnet Implement
 禁止用顾问处理普通编译/类型/格式问题。顾问默认：
 
 ```js
-const ADVISOR_MODEL = args?.advisorModel ?? 'fable'
+const ADVISOR_MODEL = args?.advisorModel ?? 'auto' // Agent 输出 advisorTier=opus/fable；显式配置优先
 const ADVISOR_MAX = args?.advisorMax ?? 3
 ```
 
 顾问只输出 `continue / change-approach / replan / stop-and-ask / escalate-implementation`，代码 ownership 始终属于 Sonnet/Opus 角色。模板用 `disallowedTools: ['Edit', 'Write']` 禁掉直接编辑；**Bash 仍可执行，因此“Bash 不得写文件”目前是 prompt 约束，不要描述成完全的硬只读沙箱**。
 
-`advisorModel` 进缓存键：一次 run 中途切换它会让 Advisor 及其后所有 agent 重跑——预算内选定就不要中途换。
+每次顾问调用的实际逻辑 model 和 Advisor effort 进入该调用的缓存输入。auto 允许按当前问题选择档位；不因普通 null/网络错误自动换模型。history 记录每次 model、问题和证据。
+
+OpenSpec 链同样支持该循环及 Repair 共享预算；Plan 失效返回 replan-required + dirtyWorktree，外层按既有 PlanPatch/PlanDelta 恢复，不直接重放实现；预算耗尽返回 needs-rework。下述 implementation-escalation-required 是通用链保留的升级路径。
 
 顾问达到上限仍不收敛时，不继续烧 token：若当前是默认实现角色，则早退 `implementation-escalation-required`，通过：
 

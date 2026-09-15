@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "workflow-bridge": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bridge/channel-server.cjs"]
+    }
+  }
+}

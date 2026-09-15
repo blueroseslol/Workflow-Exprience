@@ -16,6 +16,7 @@ const syntaxFiles = [
   ...fs.readdirSync(path.join(root, 'templates')).filter(f => f.endsWith('.js')).map(f => `templates/${f}`),
   ...fs.readdirSync(path.join(root, 'tools')).filter(f => f.endsWith('.mjs') && f !== 'verify-all.mjs').map(f => `tools/${f}`),
   ...scriptsBelow('bridge'),
+  ...scriptsBelow('tools/lib'),
   ...scriptsBelow('tools/fixtures/session-bridge'),
 ]
 
@@ -31,10 +32,12 @@ for (const relative of [
   'tools/verify-state-pipeline.mjs',
   'tools/verify-model-fallback.mjs',
   'tools/verify-effort-routing.mjs',
+  'tools/verify-workflow-repair.mjs',
   'tools/verify-session-bridge.mjs',
+  'tools/verify-channel.mjs',
 ]) {
   console.log(`\n[verify-all] ${relative}`)
   execFileSync(process.execPath, [path.join(root, relative)], { stdio: 'inherit' })
 }
 
-console.log(`\n离线验收全部通过：manifest JSON + SKILL ${skillLength}/7000 字符 + ${syntaxFiles.length} 个语法检查 + 4 组行为验证`)
+console.log(`\n离线验收全部通过：manifest JSON + SKILL ${skillLength}/7000 字符 + ${syntaxFiles.length} 个语法检查 + 6 组行为验证`)

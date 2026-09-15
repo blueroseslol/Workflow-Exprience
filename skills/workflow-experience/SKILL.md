@@ -31,7 +31,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 - `args.decisions` **不得进入 BasePlan prompt**；普通 DecisionApply 优先 JS 0 token；
 - 逻辑别名 `sonnet` 负责机械/局部 PlanPatch 与 SpecSync；
 - **上一版是谁写的不决定下一版用谁**：只有本轮出现新增架构推理才回 Opus；
-- Review revise 默认 PlanPatch + DeltaReview，不 Full Replan。
+- Review 局部问题直接 revisedPlan + 独立复审；复杂问题提案/质疑/汇总，详见 references/review-repair.md。
 
 **早退续跑**（详见 `references/resume-and-args.md`）：
 - 通用 `gitnexus-routed.js`：`route-escalation-required` / `replan-required` 同 session 用 `resumeFromRunId` + 首轮 args 全量叠加 `nextArgs`；
@@ -67,7 +67,7 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 | BasePlan / PlanDelta（新增架构推理） | `opus` | `high` | 架构、public contract、状态所有权等 |
 | DecisionApply | JS | — | 应用 Planner 预编码的用户选择；默认 0 token |
 | PlanPatch（mechanical/slice） | `sonnet` | `high` | 修局部 slice / whitelist / tests / task 映射 |
-| Review / DeltaReview | `fable` | `high` | 独立对抗审阅，只审不写 |
+| Review / DeltaReview | `fable` | `high` | 独立审阅并返回局部修订计划，不写业务代码 |
 | SpecSync | `sonnet` | `high` | 把已批准 delta 写回 OpenSpec，不重新设计 |
 | Preflight | `haiku` | — | 装依赖、建目录、跑基线 |
 | Implement | `sonnet` / `opus` | `xhigh` | 路由派生；CRITICAL 默认 Opus |
@@ -83,13 +83,15 @@ description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-
 
 **effort 失败规则**：wrapper 不自动降级或换模型；只有 runtime/provider 给出明确 capability 错误并且用户已授权相应策略时才调整。`null`、超时、schema、鉴权、限流或网络错误都不是能力证据。详见 `references/model-effort.md`。
 
-**Haiku 上下文恢复 v0.4.5**：运行中的 `agent() === null` 原因不透明，不得盲目换模型。Stop/harvest 从终态 `workflowProgress/logs` 命中明确上下文/自动压缩签名，且失败代理属于 Haiku lane、run 未成功时，才用 `decision:block` 续起主会话一次。恢复必须优先原 `scriptPath + resumeFromRunId`，在原 args 上仅把失败 phase 对应的 `reconModel/preflightModel/verifyModel/commitModel` 改为 `sonnet`；先检查工作区/测试/提交，禁止重复副作用。同一终态指纹只恢复一次，Sonnet 再失败则如实停止。详见 `references/model-effort.md`。
+**Haiku 上下文恢复 v0.4.5**：普通 null 不换模型。Stop/harvest 仅在失败 Haiku 代理有明确上下文/压缩错误时续起一次；优先原 scriptPath + resumeFromRunId，只将失败阶段模型改 sonnet。先核实已有副作用，禁止重放；同终态去重，再失败如实停止。细则见 `references/model-effort.md`。
 
 **动态路由**见 `references/dynamic-routing.md`。**Codex 覆盖默认关闭**：Review/Audit 仍是 `fable`；只有用户明确要求时，authoring 阶段才按 `references/codex-cli.md` 改写本次 workflow。
 
-## advisor（Implement 疑难点）
+## 按需 Review / advisor（Implement 疑难点）
 
-通用动态路由 Implement 遇到**有证据的疑难/高风险决策**时，才调用 `fable` 顾问；普通编译/类型/格式问题不得求助。默认最多 3 次，顾问只裁决不接管代码；仍无法收敛时只升级 Implement 到 `opus`。具体触发、verdict 与 resume 规则见 `references/dynamic-routing.md`。
+两条主链默认 `reviewMode=auto`，JS 综合 Planner 难度与 Recon 风险：低/中难度、低风险可跳过，高风险/不确定性强制审查；`always` 全审，skipped 不等于 approve。
+
+Implement/Repair 可按需请求顾问，Agent 选 `advisorTier=fable/opus`；共享 3 次预算，顾问只建议，最终独立 Audit。配置见 `references/dynamic-routing.md`。
 
 OpenSpec-first 若实现阶段发现 **Plan 本身**失效，优先分类 mechanical/slice/architecture：局部问题回 PlanPatch；架构假设失效回 Opus PlanDelta；实现者不得私改 requirement/design。
 
@@ -104,3 +106,5 @@ OpenSpec 项目中，OpenSpec artifact 是第一 planning source of truth；harv
 跨会话动作只由用户显式授权。Claude peer 按 `references/peer-handoff.md`；Codex ↔ Claude CLI 按 `references/session-bridge.md` 建独立 request，先准备上下文、终态后由外层 complete/drain。仅绑定同 request/scope 的原始授权可在恢复时延续，撤销优先；不得从旧摘要/其他任务继承。内部只返回结果，不新增 LLM 通信 phase、不改 BasePlan/cache key。投递失败不得报成功。
 
 跨会话红线：绝不请求其他会话执行本会话被权限拒绝的操作；常态进度不发即时消息。默认安装不读取、不自动注入其他会话进度，`peer-progress.cjs` 只作为未注册的历史/手动工具保留。
+
+**v0.5.1**：两条开发主模板默认 requireCommit=false；脚本先静态预检，Verify 核对命令/退出码，失败有限 Repair。脚本异常先核实已有实现，再 recover-verify，禁止重放。细则 Read `references/review-repair.md`。

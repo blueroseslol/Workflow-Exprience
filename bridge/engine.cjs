@@ -47,7 +47,7 @@ async function exportContext(store, requestId, options = {}) {
   const bundle = context.buildContext(r, source)
   return store.transact(`request:${requestId}`, () => {
     const current = assertActive(store, r)
-    C.ensure(current.workStatus === 'prepared', 'already-dispatched', '派发后上下文不可改写')
+    C.ensure(current.workStatus === 'prepared' && !current.dispatchStatus, 'already-dispatched', '派发后上下文不可改写')
     const artifactPath = store.write(store.run(requestId, 'context.json'), bundle.json)
     store.write(store.run(requestId, 'context.md'), bundle.markdown)
     const artifact = { path: artifactPath, sha256: C.hash(fs.readFileSync(artifactPath)), schemaVersion: 1 }
@@ -107,13 +107,13 @@ async function drain(store, requestId, options = {}) {
       receipt = await send(m.to, text, { ...options.codex, explicit: r.notify.transport === 'resume' })
     } catch (e) {
       const preflightFailed = e.beforeSubmission === true
-      receipt = { deliveryStatus: preflightFailed ? 'unsupported' : 'delivery-unknown', preflightFailed, errorCode: e.code || 'transport-error' }
+      receipt = { deliveryStatus: preflightFailed ? 'unsupported' : 'delivery-unknown', preflightFailed, errorCode: e.code || 'transport-error', diagnostic: e.diagnostic || { phase: preflightFailed ? 'preflight' : 'submission', errorCode: e.code || 'transport-error' } }
     }
     // A receiver may already have acknowledged while the CLI was returning.
     const received = store.maybe(store.run(requestId, 'receipt.json'))
     if (received) C.validateReceipt(received, r, m)
     entry = { ...entry, ...receipt, deliveryStatus: received?.messageId === m.messageId ? 'received' : receipt.deliveryStatus, updatedAt: new Date().toISOString() }
-    store.write(`outbox/${s.messageId}.json`, entry); setState(store, requestId, { deliveryStatus: entry.deliveryStatus })
+    store.write(`outbox/${s.messageId}.json`, entry); setState(store, requestId, { deliveryStatus: entry.deliveryStatus, deliveryErrorCode: received ? null : entry.errorCode || null, deliveryDiagnostic: received ? null : entry.diagnostic || null })
     return entry
   } finally { lock.release() }
 }
@@ -145,7 +145,8 @@ function cancel(store, requestId) {
   return store.transact(`request:${requestId}`, () => {
     const s = state(store, requestId)
     if (s.messageId) { const entry = store.read(`outbox/${s.messageId}.json`); if (entry.deliveryStatus === 'pending') store.write(`outbox/${s.messageId}.json`, { ...entry, deliveryStatus: 'cancelled' }) }
-    setState(store, requestId, { cancelRequested: true, workStatus: s.workStatus === 'prepared' ? 'cancelled' : s.workStatus, deliveryStatus: s.deliveryStatus === 'pending' ? 'cancelled' : s.deliveryStatus, stopStatus: s.workStatus === 'running' ? 'stop-requested' : 'cancelled' })
+    const possiblyExecuting = s.workStatus === 'running' || (s.channelMessage && s.emittedAt && !store.maybe(store.run(requestId, 'result.json')))
+    setState(store, requestId, { cancelRequested: true, workStatus: s.workStatus === 'prepared' ? 'cancelled' : s.workStatus, deliveryStatus: s.deliveryStatus === 'pending' ? 'cancelled' : s.deliveryStatus, stopStatus: possiblyExecuting ? 'stop-requested' : 'cancelled' })
     return state(store, requestId)
   })
 }

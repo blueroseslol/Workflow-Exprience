@@ -35,7 +35,7 @@
 }
 ```
 
-bind 补齐 requestId、bindingId、worker sessionId、hostId、scopeHash 与授权时间并落盘；保存返回 requestId。若目标已有活跃 Claude CLI，会话名通过 resolve-target 解析唯一 ID，再设置 worker 的 sessionId/displayName、`control.workerTransport:"relay"`、`maxBudgetUsd` 和 `allowCreateWorker:false`。
+bind 补齐 requestId、bindingId、worker sessionId、hostId、scopeHash 与授权时间并落盘；保存返回 requestId。若目标已有活跃 Claude CLI，优先按 [Channel 接入说明](claude-channel.md) 获取 `bridge_connect` 返回的 sessionId/cwd，设置 `control.workerTransport:"channel"` 与 `allowCreateWorker:false`。未接入 Channel 时可显式选择兼容 `relay`：用 resolve-target 唯一解析 sessionId/displayName，并提供 maxBudgetUsd。
 
 示例 allowedTools 是本次开发需要的工具授权，应按实际范围收紧。allowedPaths 是协作契约与结果校验边界，并非操作系统文件沙箱。request 输入文件放在工作区外或被忽略的目录，避免建档本身改变已确认的 Git dirty 基线；之后不得修改已绑定的权限/目标/通知配置。
 
@@ -58,6 +58,8 @@ status --request-id <id> --cwd <工作区>
 
 worker 的真实终态生成 result.json，CLI queue 将短消息和文件引用投递到原 Codex ID。队列不会替主控执行验收；目标没有消费时状态保持 queued。主控读消息后：
 
+Channel 模式通过 `bridge_complete` 或后台候选结果收集器验证并自动发送；报告子代理不直接运行 codex queue。`status` 的 `deliveryErrorCode`/`deliveryDiagnostic` 保留启动失败与进程退出的区别及脱敏输出。仅明确未提交的失败允许 `retry-delivery` 后 `drain`；未知发送状态先对账。
+
 ```text
 receive --request-id <id> --cwd <worker工作区> --session-id <当前Codex ID>
 acknowledge --request-id <id> --cwd <worker工作区> --session-id <当前Codex ID> --verdict accepted --evidence <具体证据>
@@ -77,6 +79,6 @@ cancel 撤销尚未发送的通知；运行中仅记录 stop-requested，不能�
 
 `reconcile` 只回收拥有者及相关进程已确认退出、且没有未终结 Workflow 的锁，并将遗留 sending 标记为 delivery-unknown；不发送、不重启开发。`retry-delivery` 仅重置已证明发生在发送之前的 unsupported 预检失败，随后可 drain。无法证明进程退出或 PID 已被复用时会拒绝回收。
 
-同一 request 的重复 dispatch 只返回已有状态；新的 request 可按上述约束进入同一受控 worker 的串行 inbox。外部活跃会话使用显式 relay，已验证原生 SendMessage 的 success/msg_id 与 success=false 回执。Windows 不开放 Codex resume 兼容发送：只读 stdio 状态不能证明原主控独占。退出/崩溃后的恢复必须遵循上述已实现边界。
+同一 request 的重复 dispatch 只返回已有状态；新的 request 可按上述约束进入同一受控 worker 的串行 inbox。外部活跃会话优先使用 Channel，其 `dispatchStatus`/`workerReceipt` 记录目标接收，结果回传仍使用 `deliveryStatus`/`controllerStatus`。兼容 relay 的原生 success/msg_id 只证明入队。Windows 不开放 Codex resume 兼容发送：只读 stdio 状态不能证明原主控独占。退出/崩溃后的恢复必须遵循上述已实现边界。
 
 回滚：停止新增 dispatch，对已有请求先 cancel 并检查实际进程/Workflow；不能把 stop-requested 当作已停止。确认全部退出后，可归档 `.workflow-bridge/` 状态。源码恢复只涉及本变更明确路径，保留其他未提交修改；不要在任务仍运行时删除状态。

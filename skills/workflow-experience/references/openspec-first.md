@@ -109,7 +109,7 @@ BasePlan 的 `decisionPoints[].options[]` 预先给：
 
 只有被选 option 的 `requiresArchitect=true` 时才运行 Opus `PlanDelta`，且只处理受影响部分。
 
-## 5. Review revise：PlanPatch，不 Full Replan
+## 5. Review revise：Reviewer 自修与受控讨论（v0.5.1）
 
 Reviewer 输出：
 
@@ -119,18 +119,21 @@ Reviewer 输出：
   "scope": "mechanical | slice | architecture",
   "requiresArchitect": false,
   "affectedSliceIds": ["S3"],
-  "requiredChanges": ["..."]
+  "findings": ["src/a.ts:10 缺少调用者验证，补入测试命令"],
+  "revisedPlan": "完整修订计划对象；复杂分歧时为 null"
 }
 ```
 
 路由：
 
 ```text
-mechanical/slice → Sonnet PlanPatch → DeltaReview(changed slices only)
-architecture    → Opus PlanPatch → DeltaReview(changed slices only)
+mechanical/single slice → Reviewer 返回 revisedPlan → JS 检查 → 独立复审
+cross slice/architecture → Planner 提案 → Challenger 质疑 → 唯一汇总者修订 → 独立复审
 ```
 
 默认最多 2 轮；仍 revise 则 blocked / 转人工，避免无限烧 token。
+
+JSON 中 revisedPlan 的字符串仅作字段说明，实际必须是 PLAN_SCHEMA 对象或 null。Reviewer 不写业务代码；用户决策和 mustNotTouch 不得被讨论覆盖。完整规则见 [review-repair.md](review-repair.md)。历史 dirty slice 恢复仍保留 Recovery PlanPatch。
 
 ## 6. SpecSync：让本次推理成为下次缓存
 
@@ -197,3 +200,7 @@ Sonnet/Opus Base Overlay once
 ```
 
 强模型 token 只在“新增架构不确定性”出现时支付。
+
+## 按需审查和实现顾问
+
+两条开发主链统一默认 reviewMode=auto；具体门槛和 Advisor 档位/预算见 dynamic-routing.md。Review skipped 不是 approve，SpecSync 仅同步已通过语义决议门且满足执行策略的 delta。实现/Repair 可请求 Fable 或 Opus 顾问；计划失效保留 dirty 工作树并返回 replan-required，禁止实现者自行改 requirement/design。
