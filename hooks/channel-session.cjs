@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict'
+if (!require('../bridge/feature.cjs').enabled()) process.exit(0)
 const { Store } = require('../bridge/store.cjs')
 const { sessionEvent } = require('../bridge/channel.cjs')
 let input = ''

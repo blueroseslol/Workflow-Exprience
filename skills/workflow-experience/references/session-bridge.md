@@ -1,5 +1,7 @@
 # Codex ↔ Claude Code CLI
 
+> Workflow Bridge 从 0.5.4 起暂时停用。以下契约仅供历史维护，不作为自动接入或发送指令。
+
 Claude 端是 `claude` 命令行程序，Ultracode 在它的主会话内运行。无需 Claude Desktop。Codex 通过 CLI queue 接收回传，queue 仅证明入队，主控读取并写 receipt 后才是 received。
 
 ## 何时使用

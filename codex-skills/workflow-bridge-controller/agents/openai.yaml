@@ -1,0 +1,4 @@
+interface:
+  display_name: "Workflow Bridge 主控"
+  short_description: "从 Codex 协调 Claude Code 任务，核对接收回执、结果验收与通知恢复"
+  default_prompt: "使用 $workflow-bridge-controller 将当前已授权任务派发给指定 Claude Code 会话，检查接收回执并验收结果。"

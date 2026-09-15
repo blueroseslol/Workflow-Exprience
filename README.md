@@ -153,7 +153,38 @@ workflow 继续上次任务，只把 Review 的思考强度提高到 xhigh。
 - `harvest` 第一件事读取 `stop_hook_active`；被它续起后的 Stop 只固化、不再次阻止
 - 跨轮次游标存 `os.tmpdir()`，因为 workflow 是后台任务，Stop 触发时文件可能还没落盘
 
-## Codex 主控与 Claude Code CLI 桥接（开发预览）
+## Workflow Bridge（暂时停用）
+
+**从 0.5.4 起暂停启用。** 当前接入与恢复流程未达到开箱即用的要求，插件不再注册 Bridge MCP/Channel、会话 hooks 或自动收集 Bridge 结果；Bridge CLI 的派发和回传写操作也默认关闭。普通 Workflow、Review/Repair 与 checkpoint 功能继续使用。
+
+本机 Codex 主控 Skill 已移出 skills 目录，安装脚本默认拒绝重新安装。源码及已有请求/结果保留供后续改进，下面的安装和接入内容属于停用前的历史说明，不代表当前可直接启用。维护测试可在隔离子进程设置 `WORKFLOW_BRIDGE_ENABLE_EXPERIMENTAL=1`；`verify-all` 仅对相应离线测试显式设置该值，不会启用用户会话。
+
+### 停用前的 Codex 主控 Skill（源码保留）
+
+两端分别安装：Claude Code 使用本仓库的 `workflow-experience` 插件；Codex 使用 [workflow-bridge-controller](codex-skills/workflow-bridge-controller/SKILL.md)。主控 Skill 负责准备契约、派发、查询 ACK、接收验收结果和恢复通知，调用现有 Bridge CLI。它不启用 Claude Channel，也不会因被加载就发送任务。
+
+Skill 源码仍保留在仓库，供后续重新设计时参考。当前版本安装脚本会主动拒绝安装；以下命令仅展示历史安装入口：
+
+```powershell
+node tools/install-codex-skill.mjs
+```
+
+默认安装到 `$CODEX_HOME/skills/workflow-bridge-controller`，未设置 CODEX_HOME 时为 `~/.codex/skills/workflow-bridge-controller`。可用 `--dest <绝对skills目录>` 指定位置。相同内容重复安装不改动，已有不同内容会保留并报错，更新前应比较和备份。
+
+功能重新启用前不要使用以下调用：
+
+```text
+使用 $workflow-bridge-controller，把当前已授权任务发送给指定 Claude Code 会话，确认接收回执后跟进结果。
+使用 $workflow-bridge-controller，检查这个 request 的状态；如果只是通知失败，按已有授权恢复通知。
+```
+
+Skill 重新启用后可保持自动发现，也可用 `$workflow-bridge-controller` 显式调用。历史实现需要 Node.js 与 Claude 插件 0.5.3 或更新版本；当前 0.5.4 默认停用。自带的 `scripts/locate-runtime.cjs` 只读定位当前用户级安装并返回 CLI/文档路径；安装候选不唯一时需明确选择，也支持 `WORKFLOW_BRIDGE_PLUGIN_ROOT` 指定绝对运行时目录。
+
+目标 Claude 仍需按 [Channel 接入说明](docs/claude-channel.md) 启用通道并调用 `bridge_connect`。新请求须区分会话 `worker.cwd` 与 Git `workspace.worktreeRoot`；只有 `receiptConfirmed:true` 才确认目标已收到。Skill 不内置任何 backend 会话 ID、项目路径、模型或费用授权。
+
+维护时运行 `node tools/verify-codex-skill.mjs` 检查安装幂等、已有修改保护和运行时定位；此项也纳入 `node tools/verify-all.mjs`。Skill 源文件放在独立 `codex-skills/` 下，避免被 Claude 当成其原生 workflow Skill 加载。
+
+### Bridge 运行机制
 
 活跃会话新增 [本地 Channel + 接收回执](docs/claude-channel.md)：Codex 直接写持久队列，由目标会话接收并 `bridge_ack`，无需临时 Claude relay。支持身份校验、超时可见、重复投递去重和断线保守恢复。使用前需在目标显式启用开发 Channel 并调用 `bridge_connect`；离线协议验收与真实会话验收分开记录。
 

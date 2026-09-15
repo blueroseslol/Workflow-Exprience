@@ -16,6 +16,7 @@ const syntaxFiles = [
   ...fs.readdirSync(path.join(root, 'templates')).filter(f => f.endsWith('.js')).map(f => `templates/${f}`),
   ...fs.readdirSync(path.join(root, 'tools')).filter(f => f.endsWith('.mjs') && f !== 'verify-all.mjs').map(f => `tools/${f}`),
   ...scriptsBelow('bridge'),
+  ...scriptsBelow('codex-skills'),
   ...scriptsBelow('tools/lib'),
   ...scriptsBelow('tools/fixtures/session-bridge'),
 ]
@@ -35,9 +36,12 @@ for (const relative of [
   'tools/verify-workflow-repair.mjs',
   'tools/verify-session-bridge.mjs',
   'tools/verify-channel.mjs',
+  'tools/verify-codex-skill.mjs',
+  'tools/verify-bridge-disabled.mjs',
 ]) {
   console.log(`\n[verify-all] ${relative}`)
-  execFileSync(process.execPath, [path.join(root, relative)], { stdio: 'inherit' })
+  const experimental = ['tools/verify-session-bridge.mjs', 'tools/verify-channel.mjs', 'tools/verify-codex-skill.mjs'].includes(relative)
+  execFileSync(process.execPath, [path.join(root, relative)], { stdio: 'inherit', env: { ...process.env, ...(experimental ? { WORKFLOW_BRIDGE_ENABLE_EXPERIMENTAL: '1' } : {}) } })
 }
 
-console.log(`\n离线验收全部通过：manifest JSON + SKILL ${skillLength}/7000 字符 + ${syntaxFiles.length} 个语法检查 + 6 组行为验证`)
+console.log(`\n离线验收全部通过：manifest JSON + SKILL ${skillLength}/7000 字符 + ${syntaxFiles.length} 个语法检查 + 8 组行为验证`)

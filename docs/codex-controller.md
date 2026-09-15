@@ -1,5 +1,7 @@
 # Astra 主控：Claude Code CLI 开发与回传
 
+> 0.5.4 起 Workflow Bridge 暂时停用，Codex 主控 Skill 已移出本机发现目录。以下为历史维护说明，不应据此启动派发或回传；请在当前 Claude 会话使用普通 Workflow。
+
 本机桥接入口是 `node tools/session-bridge.mjs`。Claude Code 是命令行执行器；先 doctor 检查实际 executable 和版本。保持当前 Astra Low；它与 Claude 的 opus/sonnet 等逻辑角色分开配置。
 
 ## 创建任务

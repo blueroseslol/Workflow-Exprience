@@ -1,5 +1,7 @@
 # Claude 活跃会话 Channel 与接收回执
 
+> 0.5.4 起功能暂时停用，以下为历史接入文档。当前版本不注册 MCP/Channel，写操作默认返回 bridge-disabled；请使用普通 Workflow 在当前会话交付。
+
 本地链路：Codex `dispatch` → 工作区持久队列 → 目标 Claude 的 MCP Channel → 目标 `bridge_ack` → Codex `status`。转发不新建 Claude CLI，不调用转发模型，不开放 HTTP 端口。原来的 `worker` 和显式 `relay` 保留兼容；既有 request 的 transport 不可更改，新建 request 选择 `channel`。
 
 ## 一次接入目标会话

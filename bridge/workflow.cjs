@@ -4,11 +4,20 @@ const path = require('node:path')
 const os = require('node:os')
 const C = require('./contracts.cjs')
 const { readJson } = require('./store.cjs')
-function runsDirectory(sessionId, projects = process.env.ULTRACODE_PROJECTS_DIR || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects')) {
+function runsDirectory(sessionId, projects = process.env.ULTRACODE_PROJECTS_DIR || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects'), runId) {
   C.ensure(C.id(sessionId), 'identity-mismatch', '无效 worker session')
   let dirs
   try { dirs = fs.readdirSync(projects, { withFileTypes: true }).filter(e => e.isDirectory()).slice(0, 500) } catch (e) { if (e.code === 'ENOENT') return null; throw e }
-  const found = dirs.map(d => path.join(projects, d.name, sessionId, 'workflows')).filter(p => fs.existsSync(p))
+  let found = dirs.map(d => path.join(projects, d.name, sessionId, 'workflows')).filter(p => fs.existsSync(p))
+  if (found.length > 1 && runId) {
+    C.ensure(C.id(runId) && runId.startsWith('wf_'), 'invalid-reference', '需要真实 wf_ run ID')
+    found = found.filter(dir => {
+      if (fs.existsSync(path.join(dir, `${runId}.json`))) return true
+      const scripts = path.join(dir, 'scripts')
+      // An active inline run may have its script before its snapshot is saved.
+      return fs.existsSync(scripts) && fs.readdirSync(scripts, { withFileTypes: true }).some(e => e.isFile() && e.name.endsWith(`-${runId}.js`))
+    })
+  }
   C.ensure(found.length <= 1, 'needs-target', '同 session 出现多个 Workflow 目录')
   return found[0] || null
 }
@@ -26,7 +35,7 @@ function terminalStatus(run) {
 function terminal(run) { return !!(run && ['completed', 'failed', 'killed', 'error', 'cancelled'].includes(run.status)) }
 function readRun(r, runId, options = {}) {
   C.ensure(C.id(runId) && runId.startsWith('wf_'), 'invalid-reference', '需要真实 wf_ run ID')
-  const dir = runsDirectory(r.worker.sessionId, options.projects)
+  const dir = runsDirectory(r.worker.sessionId, options.projects, runId)
   C.ensure(dir, 'workflow-unavailable', '没有匹配 worker session 的 Workflow 记录')
   const file = C.boundedPath(dir, path.join(dir, `${runId}.json`))
   const run = readJson(file, 16 * 1024 * 1024)
@@ -50,7 +59,11 @@ function discover(r, options = {}) {
 }
 function verifyResult(r, result, options) {
   const record = readRun(r, result.workflowRunId, options)
-  C.ensure(record.workStatus && record.workStatus === result.workStatus && record.terminalFingerprint === result.terminalFingerprint && C.samePath(C.real(record.run.scriptPath), C.real(result.scriptPath)), 'terminal-mismatch', '结果与真实 Workflow 终态不一致')
+  const conservativeFailure = record.workStatus === 'completed' && (
+    (result.workStatus === 'failed' && result.tests?.some(t => Number.isInteger(t.exitCode) && t.exitCode !== 0)) ||
+    (result.workStatus === 'blocked' && result.remainingTaskIds?.length > 0 && result.blockers?.length > 0)
+  )
+  C.ensure(record.workStatus && (record.workStatus === result.workStatus || conservativeFailure) && record.terminalFingerprint === result.terminalFingerprint && C.samePath(C.real(record.run.scriptPath), C.real(result.scriptPath)), 'terminal-mismatch', '结果与真实 Workflow 终态不一致')
   return record
 }
 module.exports = { runsDirectory, fingerprint, terminal, terminalStatus, readRun, discover, verifyResult }

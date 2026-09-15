@@ -6,6 +6,7 @@ const { Receiver } = require('./channel.cjs')
 const C = require('./contracts.cjs')
 
 async function main() {
+  require('./feature.cjs').assertEnabled()
   // These values come from the Claude parent, never from tool arguments.
   const sessionId = process.env.CLAUDE_CODE_SESSION_ID
   C.ensure(C.id(sessionId), 'identity-mismatch', 'Channel 必须由 Claude Code 启动并提供 CLAUDE_CODE_SESSION_ID')

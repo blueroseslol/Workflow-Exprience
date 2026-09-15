@@ -35,6 +35,7 @@ export function parseArgs(argv) {
 }
 export async function main(argv) {
   const { command, options: o } = parseArgs(argv)
+  if (!['help', 'doctor', 'status', 'inspect-run', 'resolve-target', 'validate-intent'].includes(command)) require('../bridge/feature.cjs').assertEnabled()
   const cwd = path.resolve(o.cwd || process.cwd())
   if (command === 'help') return { commands: COMMANDS, common: ['--cwd <worker-dir>', '--request-id <id>'], guide: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../docs/codex-controller.md') }
   if (command === 'doctor') {
