@@ -151,7 +151,7 @@ function cancel(store, requestId) {
   })
 }
 function checkDrift(r) {
-  const current = gitSnapshot(r.worker.cwd)
+  const current = gitSnapshot(r.workspace.worktreeRoot)
   C.ensure(current.head === r.workspace.baselineHead, 'workspace-drift', 'HEAD 已变化，需重新规划/绑定')
   const clean = text => String(text || '').split('\n').filter(l => !/^\?\? (?:\.workflow-bridge\/|\.claude\/progress(?:\/|$)|docs\/ultracode(?:\/|$))/.test(l)).join('\n')
   C.ensure(clean(current.dirtySnapshot) === clean(r.workspace.dirtySnapshot), 'workspace-drift', '工作树已变化，需核对授权基线')

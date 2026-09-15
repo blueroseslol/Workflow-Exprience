@@ -72,7 +72,7 @@ function markdown(bundle) {
 function buildContext(r, history = { messages: [], gaps: ['history-not-requested'], source: 'explicit-request' }) {
   validateRequest(r)
   const files = r.workspace.allowedPaths.flatMap(p => {
-    const file = boundedPath(r.worker.cwd, path.resolve(r.worker.cwd, p), { exists: false })
+    const file = boundedPath(r.workspace.worktreeRoot, path.resolve(r.workspace.worktreeRoot, p), { exists: false })
     if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return [{ path: p, sha256: null, observation: 'missing-or-directory' }]
     if (fs.statSync(file).size > 16 * 1024 * 1024) return [{ path: p, sha256: null, observation: 'hash-budget-exceeded' }]
     return [{ path: p, sha256: hash(fs.readFileSync(file)), observation: 'file' }]
@@ -100,7 +100,7 @@ function verifySourceFiles(store, r) {
   ensure(bundle.scopeHash === r.intent.scopeHash, 'scope-mismatch', '上下文授权摘要不匹配')
   for (const entry of bundle.files || []) {
     if (entry.observation !== 'file') continue
-    const file = boundedPath(r.worker.cwd, path.resolve(r.worker.cwd, entry.path))
+    const file = boundedPath(r.workspace.worktreeRoot, path.resolve(r.workspace.worktreeRoot, entry.path))
     ensure(fs.statSync(file).size <= 16 * 1024 * 1024 && hash(fs.readFileSync(file)) === entry.sha256, 'workspace-drift', '上下文导出后授权文件内容已变化')
   }
   return bundle

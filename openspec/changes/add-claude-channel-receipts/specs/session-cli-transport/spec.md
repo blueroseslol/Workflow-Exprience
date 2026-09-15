@@ -23,6 +23,10 @@
 - **WHEN** session 生命周期结束、epoch 改变、工作区不匹配或另一个连接占用同一 session
 - **THEN** 拒绝消费或回执，不从消息提供的 session ID 接管其他目标
 
+#### Scenario: 会话目录包含实际 Git 子仓库
+- **WHEN** Channel 会话 cwd 是非 Git 父目录，契约显式声明该目录内的 workspace.worktreeRoot 子仓库
+- **THEN** 保持会话 ID/cwd 与 store 路由不变，Git 基线、上下文和结果路径按 worktreeRoot 校验；外部目录及解析后越界仍拒绝
+
 #### Scenario: 后续任务串行
 - **WHEN** 同会话前一请求已经可能发布且尚无经 Workflow 快照验证的结果
 - **THEN** 后续请求等待；取消和超时不证明执行停止，未 ACK 请求由目标明确拒收后可释放队列

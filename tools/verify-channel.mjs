@@ -61,6 +61,31 @@ const ackArgs = f => {
 }
 const error = (fn, code) => assert.throws(fn, e => e.code === code)
 
+test('父会话目录非 Git：子仓库导出、派发、ACK、结果路径及漂移校验', async t => {
+  const seed = await fixture()
+  const session = fs.mkdtempSync(path.join(temp, 'session-parent-'))
+  const repo = path.join(session, 'backend'); fs.renameSync(seed.cwd, repo)
+  fs.writeFileSync(path.join(session, 'probe.txt'), 'outside-repository')
+  const input = { ...seed.input, requestId: crypto.randomUUID(), origin: { ...seed.input.origin, cwd: session }, worker: { ...seed.input.worker, cwd: session }, workspace: { ...seed.input.workspace, repoRoot: repo, worktreeRoot: repo } }
+  const store = new Store(session, undefined, { create: true })
+  E.bind(store, input); await E.exportContext(store, input.requestId)
+  const r = E.load(store, input.requestId); const f = { store, cwd: session, r }
+  const context = store.read(store.run(r.requestId, 'context.json'))
+  assert.equal(context.files[0].sha256, C.hash(fs.readFileSync(path.join(repo, 'probe.txt'))))
+  assert.equal(H.dispatch(store, r.requestId, { dryRun: true }).message.cwd, session)
+  H.dispatch(store, r.requestId)
+  const a = receiver(f, t); let sent = 0
+  await a.pump(async () => sent++); assert.equal(sent, 1)
+  assert.equal(a.acknowledge(ackArgs(f)).receipt.cwd, session)
+  const result = { schemaVersion: 1, requestId: r.requestId, workflowRunId: 'wf_scope', scriptPath: path.join(repo, 'probe.txt'), terminalFingerprint: 'fixture', workStatus: 'blocked', summary: 'fixture', baselineHead: r.workspace.baselineHead, currentHead: r.workspace.baselineHead, completedTaskIds: [], remainingTaskIds: ['1'], changedFiles: ['probe.txt'], commits: [], tests: [], blockers: ['fixture'], nextActions: [], sourceRefs: [] }
+  C.validateResult(result, r)
+  error(() => C.validateResult({ ...result, changedFiles: ['../probe.txt'] }, r), 'path-outside-root')
+  fs.writeFileSync(path.join(repo, 'probe.txt'), 'changed')
+  error(() => E.checkDrift(r), 'workspace-drift')
+  error(() => C.createRequest({ ...input, control: { ...input.control, workerTransport: 'worker' } }), 'workspace-mismatch')
+  error(() => C.createRequest({ ...input, workspace: { ...input.workspace, worktreeRoot: root } }), 'workspace-mismatch')
+})
+
 test('CLI dry-run、离线持久队列、重复派发、上下文冻结和超时', async () => {
   const f = await fixture()
   const args = ['dispatch', '--cwd', f.cwd, '--request-id', f.r.requestId]

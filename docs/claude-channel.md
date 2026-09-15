@@ -19,6 +19,25 @@ Channels 属于研究预览，需使用支持该能力的 Claude 认证与组织
 
 ## Codex 请求和查询
 
+### 会话目录与 Git 工作区分离（0.5.3）
+
+`worker.cwd` 始终保持 `bridge_connect` 返回的会话目录；`workspace.worktreeRoot` 声明实际 Git 工作区。Channel 允许工作区为会话目录下的子目录；跨到外部目录或链接解析后越界仍拒绝。Git 基线、allowedPaths、上下文文件哈希、changedFiles 和工作区内 Workflow 脚本都以 worktreeRoot 为基准。CLI `--cwd` 与 store 仍位于会话目录，确保原 Channel 能发现请求；不要把 --cwd 改成子仓库。
+
+本例配置：
+
+```json
+{
+  "worker": {"provider":"claude","hostId":"local","sessionId":"4a69baa0-7a34-4e18-a898-640adecf306b","cwd":"D:/AI/Website/LDL_UGC"},
+  "workspace": {
+    "repoRoot":"D:/AI/Website/LDL_UGC/backend",
+    "worktreeRoot":"D:/AI/Website/LDL_UGC/backend",
+    "allowedPaths":["src","openspec"]
+  }
+}
+```
+
+此处为字段示例，baselineHead/dirtySnapshot 需从 backend 读取，allowedPaths 应按实际任务授权声明，其余必填字段沿用完整契约。已绑定请求不可更改 workspace；旧错误绑定需取消并新建。更新安装后须重载目标 MCP 并重新 bridge_connect，旧进程仍使用旧验证代码。
+
 沿用 [主控请求结构](codex-controller.md)，设置：
 
 ```json

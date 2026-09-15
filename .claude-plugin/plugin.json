@@ -1,7 +1,7 @@
 {
   "name": "workflow-experience",
   "channels": [{ "server": "workflow-bridge" }],
-  "version": "0.5.2",
-  "description": "Ultracode workflow 经验库：Reviewer 自修、脚本预检、失败阶段恢复、真实验证门禁与 Claude Channel 双向回执（v0.5.2）",
+  "version": "0.5.3",
+  "description": "Ultracode workflow 经验库：Reviewer 自修、脚本预检、失败阶段恢复、Claude Channel 双向回执及会话与 Git 工作区分离（v0.5.3）",
   "author": { "name": "loujiajie" }
 }

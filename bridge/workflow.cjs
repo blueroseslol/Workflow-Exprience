@@ -34,7 +34,7 @@ function readRun(r, runId, options = {}) {
   if (!run.runId) run.runId = runId
   C.ensure(run.scriptPath, 'workflow-unavailable', 'Workflow 未记录 scriptPath')
   // Inline Workflow scripts are materialized by Claude under this exact session.
-  const scriptRoot = C.within(C.real(r.worker.cwd), path.resolve(run.scriptPath)) ? r.worker.cwd : path.join(dir, 'scripts')
+  const scriptRoot = C.within(C.real(r.workspace.worktreeRoot), path.resolve(run.scriptPath)) ? r.workspace.worktreeRoot : path.join(dir, 'scripts')
   C.boundedPath(scriptRoot, run.scriptPath)
   return { run, file, terminal: terminal(run), workStatus: terminalStatus(run), terminalFingerprint: fingerprint(run) }
 }

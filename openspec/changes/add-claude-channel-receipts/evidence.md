@@ -1,11 +1,17 @@
 # 2026-09-15 验收记录
 
-源码工作区：`D:\AI\Skill\Workflow-Exprience`，基线 HEAD `534dc01`，本次为未提交增量；保留入场时既有 dirty 文件。Claude 插件版本 0.5.2。
+## 0.5.3 目录分离修复
+
+本次源码基线 `083a528`。完整 `node tools/verify-all.mjs` 退出 0：原桥接 68/68、Channel 16/16、42 个语法检查及其余行为验证通过，零模型调用。Claude manifest、OpenSpec strict 与 git diff --check 通过。
+
+真实路径只读验证：会话 `4a69baa0-7a34-4e18-a898-640adecf306b` 保持 cwd `D:\AI\Website\LDL_UGC`，显式 worktreeRoot/repoRoot 为其下 `backend`。在当时基线 `31cfbbd2e78e5aa0420a14aaee2de67e0bdc0951` 上，契约验证、Git 漂移检查和 tasks.md 上下文哈希均通过。未建立真实开发请求、未发送消息，实际接收仍需目标加载新版本后单独确认。
+
+源码工作区：`D:\AI\Skill\Workflow-Exprience`，基线 HEAD `083a528`，本次为未提交的目录分离增量；保留入场时既有 dirty 文件。Claude 插件版本 0.5.3。
 
 ## 自动验收
 
 - `npm run build:channel-sdk`：退出 0；打包 MCP SDK 1.30.0，生成 8 个包的第三方许可说明。
-- `node tools/verify-all.mjs`：退出 0。42 个语法检查、6 组行为验证；原 session bridge 68/68、Channel/回传新增 15/15、Workflow repair 120 项全部通过。checkpoint、fallback、effort 路由检查通过。SKILL 6991/7000 字符。
+- `node tools/verify-all.mjs`：退出 0。42 个语法检查、6 组行为验证；原 session bridge 68/68、Channel/回传新增 16/16、Workflow repair 120 项全部通过。checkpoint、fallback、effort 路由检查通过。SKILL 6991/7000 字符。
 - `claude plugin validate .claude-plugin/plugin.json`：退出 0。
 - `openspec validate add-claude-channel-receipts --strict`：退出 0。
 - `git diff --check`：退出 0。

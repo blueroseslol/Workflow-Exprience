@@ -66,7 +66,8 @@ function validateRequest(r, { checkExpiry = true } = {}) {
   const w = r.workspace
   ensure(w && Array.isArray(w.allowedPaths) && w.allowedPaths.length > 0, 'invalid-contract', '缺少工作区授权路径')
   real(w.repoRoot); real(w.worktreeRoot)
-  ensure(samePath(real(w.worktreeRoot), real(r.worker.cwd)), 'workspace-mismatch', 'worker cwd 必须匹配 worktreeRoot')
+  const sessionRoot = real(r.worker.cwd), worktreeRoot = real(w.worktreeRoot)
+  ensure(samePath(worktreeRoot, sessionRoot) || (r.control?.workerTransport === 'channel' && within(sessionRoot, worktreeRoot)), 'workspace-mismatch', 'worktreeRoot 必须匹配会话目录，或为 Channel 会话目录内显式声明的工作区')
   if (!samePath(real(r.origin.cwd), real(r.worker.cwd))) ensure(r.workspace.worktreeMapping?.origin === real(r.origin.cwd) && r.workspace.worktreeMapping?.worker === real(r.worker.cwd), 'workspace-mismatch', '跨 worktree 需要明确映射')
   for (const p of w.allowedPaths) boundedPath(w.worktreeRoot, path.resolve(w.worktreeRoot, p), { exists: false })
   text(w.baselineHead, 'baselineHead'); text(r.work?.requirement, 'requirement')
@@ -120,8 +121,8 @@ function validateResult(v, r) {
   const taskIds = [...v.completedTaskIds, ...v.remainingTaskIds]
   ensure(new Set(taskIds).size === taskIds.length && r.work.taskIds.every(t => taskIds.includes(t)), 'scope-mismatch', '任务完成/剩余列表必须完整且不重叠')
   for (const changed of v.changedFiles) {
-    const file = boundedPath(r.worker.cwd, path.resolve(r.worker.cwd, changed), { exists: false })
-    ensure(r.workspace.allowedPaths.some(p => within(path.resolve(r.worker.cwd, p), file)), 'scope-mismatch', '结果包含授权范围外的修改路径')
+    const file = boundedPath(r.workspace.worktreeRoot, path.resolve(r.workspace.worktreeRoot, changed), { exists: false })
+    ensure(r.workspace.allowedPaths.some(p => within(path.resolve(r.workspace.worktreeRoot, p), file)), 'scope-mismatch', '结果包含授权范围外的修改路径')
   }
   for (const t of v.tests) {
     text(t.command, 'test.command'); real(t.cwd)
