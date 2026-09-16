@@ -37,7 +37,7 @@
 
 export const meta = {
   name: '<kebab-case-name>',
-  description: '<一句话，会显示在权限对话框>；GitNexus 动态路由',
+  description: 'GitNexus Recon 定 blast radius → 动态路由 Sonnet/Opus 规划 → Fable 对抗审阅 → 白名单实现 → Haiku 取证式 Verify；拍板即早退',
   phases: [
     { title: 'Recon', model: 'haiku' },
     // Plan / Review / Implement / Audit 的模型由路由运行时派生，meta 是纯字面量无法声明，故不写 model

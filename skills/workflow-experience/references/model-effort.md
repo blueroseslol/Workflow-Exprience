@@ -12,9 +12,9 @@
 | Implement | `sonnet` / `opus` | `xhigh` | 常规实现 / CRITICAL 或不收敛升级 |
 | Preflight / Verify / Commit | `haiku` | 省略 | 基线、测试、证据和提交 |
 
-逻辑别名是 workflow 的稳定接口。CC Switch 可以让 `opus` 与 `sonnet` 指向同一个 GPT-5.6 Sol 上游；二者仍保留独立角色、独立用户 effort 覆盖和独立缓存身份。风险升级到 `opus` 代表执行角色与请求参数升级，不能在无路由证据时描述成“已换成更强上游模型”。
+逻辑别名是 workflow 的稳定接口。CC Switch 可以让 `opus`、`sonnet`，甚至 `fable` 指向同一个上游；这些别名仍保留独立角色、独立用户 effort 覆盖和独立缓存身份。风险升级到 `opus` 代表执行角色与请求参数升级，不能在无路由证据时描述成“已换成更强上游模型”。
 
-`fable` 可映射 GPT-6 Astra，`haiku` 可映射 GPT-5.6 Terra 或 Luna。映射会随 provider 改变，当前 settings 只是 configured，代理请求日志才是 observed；历史请求不能证明新配置已经生效。
+`sonnet`、`opus`、`fable`、`haiku` 都是 provider 可配置的逻辑别名。映射会随 provider 改变，当前 settings 只是 configured，代理请求日志才是 observed；历史请求不能证明新配置已经生效。插件描述、模板和提示词只写逻辑别名，不再把 Kimi、Sol、DeepSeek 等上游身份写死。
 
 ## 二、用户覆盖契约
 
@@ -33,7 +33,7 @@ args.phaseEfforts = { Implement: 'high', Review: 'xhigh', Advisor: 'max' }
 
 `null` 表示恢复调用点默认，不会作为字符串传给 provider。未知逻辑别名、未知阶段和非法 effort 在第一次 agent 派发前报错。`Review`、`Advisor`、`Audit` 是三个独立键。
 
-Opus/Sonnet 即使同指向 Sol，`modelEfforts.opus` 也不能影响 Sonnet。若用户只说“Sol 用 max”而任务中多个别名都指向 Sol，authoring 应结合明确阶段解释；仍有实质歧义时询问用户，不能猜一个别名。
+Opus/Sonnet 即使指向同一上游，`modelEfforts.opus` 也不能影响 Sonnet。若用户只按上游名称指定 effort，而任务中多个别名都指向该上游，authoring 应结合明确阶段解释；仍有实质歧义时询问用户，不能猜一个别名。
 
 ## 三、恢复与缓存
 

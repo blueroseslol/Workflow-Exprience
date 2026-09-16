@@ -10,7 +10,7 @@
 
 export const meta = {
   name: '<kebab-case-name>',
-  description: '<一句话>；OpenSpec-first 增量执行',
+  description: 'OpenSpec 任务：GitNexus Recon 定 blast radius → 动态路由 Sonnet/Opus 规划 → Fable 对抗审阅 → 白名单实现 → Haiku 取证式 Verify；拍板即早退',
   phases: [
     { title: 'Recon', model: 'haiku' },
     { title: 'Plan' },

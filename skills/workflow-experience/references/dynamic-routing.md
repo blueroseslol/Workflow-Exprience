@@ -102,7 +102,7 @@ const needsReview         = decideReview(args, recon, plan, route).required // P
 > 所有等级的 Verify 都只验证、不提交；提交统一由 Commit 层在 Commit Gate 放行后执行（见下节）。
 > Final Audit 触发条件：`route === 'CRITICAL' || routeMiss`——**LOW 的 routeMiss 比 HIGH 更值得审计**，因为它意味着前面的 Recon + Planner 都低估了爆炸范围。
 
-LOW 默认跳过 Sol Review 是**可配置策略**，不是硬编码：
+LOW 默认跳过 `fable` Review 是**可配置策略**，不是硬编码：
 ```js
 const REVIEW_MODE = args?.reviewMode ?? 'auto' // always 全审；兼容 alwaysReview=true
 ```
@@ -135,7 +135,7 @@ Recon → Route → Plan → Plan Risk Gate → Review → Preflight → Impleme
 
 两个关键分离：
 
-- **Verify / Commit 全程分离**：所有等级的 Verify 都只验证不提交；`routeMiss` 在提交前算，`needsAudit = CRITICAL || routeMiss`。这样即使 LOW/MEDIUM 也能在提交前被 routeMiss 拦住、升级 Sol Audit 再决定提交与否——堵住「先提交后才发现低估」的洞。代价只是 LOW/MEDIUM 多一个很便宜的 haiku Commit agent。
+- **Verify / Commit 全程分离**：所有等级的 Verify 都只验证不提交；`routeMiss` 在提交前算，`needsAudit = CRITICAL || routeMiss`。这样即使 LOW/MEDIUM 也能在提交前被 routeMiss 拦住、升级 `fable` Audit 再决定提交与否——堵住「先提交后才发现低估」的洞。代价只是 LOW/MEDIUM 多一个很便宜的 haiku Commit agent。
 - **Preflight 必须保留**：动态路由改变的是模型选择，**不是牺牲基线核对**。haiku Preflight 建测试基线，Verify 据此判「回退」，这是反假绿的地基。
 
 > 早退的 `route-escalation-required` / `replan-required` 与 `need-decision` 一样，是把控制权交回主 agent / 用户的既定模式，不是失败。
