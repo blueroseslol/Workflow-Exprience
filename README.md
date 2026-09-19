@@ -4,11 +4,13 @@ Ultracode workflow 的本机经验库：可粘贴模板、约束速查、运行�
 
 以 **Claude Code plugin** 形式提供（而非裸 skill），因为需求中的三个 hook 必须常驻。
 
+当前开发入口：同一需求共享计划，按依赖和文件/资源归属并行实现（默认最多 2 个叶子）；OpenSpec 默认在里程碑完成后一次 Review，切片保留 Verify。参数与边界见 [并行执行](skills/workflow-experience/references/parallel-execution.md)、[里程碑 Review](skills/workflow-experience/references/milestone-review.md)。主 Skill 与命令已去重，条件性细节按需读取。以下 Token 数字是立项时历史语料，不是本次优化的实测节省率。
+
 ---
 
 ## 这个项目要解决什么
 
-**不是省 token。** 立项时的假设是"加载经验文档能省下写脚本的 token"，实测数据推翻了它：
+立项时的假设是"加载经验文档能省下写脚本的 token"，历史语料不支持仅靠增加文档达到这一目的：
 
 | 事实 | 数字 |
 |---|---|

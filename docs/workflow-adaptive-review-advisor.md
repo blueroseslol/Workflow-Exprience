@@ -1,6 +1,6 @@
 # 按需 Reviewer 与实现 Adviser
 
-适用于 `gitnexus-routed.js`、`openspec-incremental.js`。其他历史模板保持原行为。
+通用链 `gitnexus-routed.js` 使用下述 adaptive 策略。OpenSpec 链现在默认 `reviewTiming='milestone'`：里程碑完成后一次 Review，普通切片/局部 Repair 不反复审计划；设计缺口、漂移、语义变化或关键未知项才提前审查，实际影响超计划仍触发例外 Audit。详见 [里程碑规则](../skills/workflow-experience/references/milestone-review.md)。OpenSpec 显式设 `reviewTiming='plan'` 可恢复下述策略。其他历史模板保持原行为。
 
 默认参数：
 
@@ -14,7 +14,7 @@ Planner 亲自读码输出 `reviewAssessment`（difficulty、risk、uncertainty�
 
 实现 Agent 在 Implement 或 Repair 中遇到有证据的难题，返回 `done=false`、`needsAdvisor=true`、具体 `advisorQuestion`、`blockingEvidence` 和 `advisorTier`。局部诊断/方案裁决选择 fable，架构/公共契约/并发状态所有权推理选择 opus。显式 `advisorModel=opus/fable` 覆盖 Agent 选择；Advisor 使用独立 effort 角色。
 
-外层脚本调用顾问并传回意见，实现 Agent 读取当前 git diff、核实建议后继续。实现和 Repair 共享每 run 的顾问次数，默认 3，允许整数 0–5。调用前计数；null 失败退出，不静默切换模型。普通编译、类型、格式问题应自行解决。顾问调用或反复 Repair 会触发最终独立 Audit；发现超预期影响仍沿用 routeMiss Audit。
+外层脚本调用顾问并传回意见，实现 Agent 读取当前 git diff、核实建议后继续。实现、并行切片和 Repair 共享每 run 的顾问次数，默认 3，允许整数 0–5。调用前计数；null 失败退出，不静默切换模型。普通编译、类型、格式问题应自行解决。通用链或 OpenSpec 的 plan 模式中，顾问调用或反复 Repair 会触发最终独立 Audit；milestone 模式延至里程碑完成，发现超预期影响仍触发例外 Audit。
 
 顾问禁止 Edit/Write；Bash 禁止写入仍是 prompt 约束，并非硬只读沙箱。顾问只能建议，不能扩大 whitelist、改变 requirement/design 或替用户做新决定。
 

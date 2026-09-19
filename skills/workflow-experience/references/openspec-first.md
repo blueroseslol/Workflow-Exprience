@@ -15,16 +15,16 @@ BasePlan：只生成 execution overlay / delta
   ↓
 DecisionApply：纯 JS 应用用户选择
   ↓
-Review：只审 overlay
-  ↓ revise
-PlanPatch：只修 affected slices
+设计缺口/漂移/语义变更时才提前 Review → 必要 PlanPatch / DeltaReview
   ↓
-DeltaReview：只复审 changed slices
-  ↓
-SpecSync：把已批准 delta 写回 OpenSpec
+SpecSync → Implement（可按依赖并行）→ Verify
+  ↓ 里程碑全部任务完成
+一次里程碑 Review（Audit）
 ```
 
 收益不是“少读文档”，而是避免昂贵模型反复重新**创造**已经存在的规划。
+
+默认 reviewTiming=milestone，普通切片与机械修订不反复审计划；完整规则见 [里程碑审查](milestone-review.md)。下文 Review/DeltaReview 修订流程仅在确需提前审查或显式 reviewTiming=plan 时使用。并行切片 execution 字段见 [并行执行](parallel-execution.md)。
 
 ## 1. 两种项目模式
 

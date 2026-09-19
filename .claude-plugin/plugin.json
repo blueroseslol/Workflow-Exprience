@@ -1,6 +1,6 @@
 {
   "name": "workflow-experience",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Ultracode workflow 经验库：GitNexus/OpenSpec Recon、Sonnet/Opus 动态规划、Fable 对抗审阅、白名单实现与 Haiku 取证验证；拍板即早退",
   "author": { "name": "loujiajie" }
 }

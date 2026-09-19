@@ -2,6 +2,8 @@
 
 把固定逻辑链（Opus Plan → Fable Review → Haiku Preflight → Sonnet Implement → Haiku Verify）升级为**按证据路由**：侦察角色发现事实，JS 纯函数算风险，升级角色只在真正需要时介入。
 
+本文的前置 Review 门主要用于无 OpenSpec 通用链。OpenSpec 默认 reviewTiming=milestone，按 [里程碑规则](milestone-review.md) 延后常规审查；显式 reviewTiming=plan 才恢复本文策略。并行实现规则见 [parallel-execution](parallel-execution.md)。
+
 > 第一目标：降低 killed / failed / abort / 返工。省 token 是第二目标。
 > 配套模板：`../../templates/gitnexus-routed.js`（实验性，与 `four-phase.js` baseline 并存）
 

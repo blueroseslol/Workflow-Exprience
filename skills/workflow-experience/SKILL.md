@@ -1,110 +1,48 @@
 ---
 name: workflow-experience
-description: 写 Ultracode workflow 脚本时的本机经验库 —— OpenSpec-first 增量规划、意图路由、可粘贴模板、约束句式、模型分工、GitNexus 动态路由与 resume/args 缓存语义。当用户以 workflow 前缀提交开发需求、要为开发任务编写 Workflow 脚本、或在 OpenSpec 里程碑中执行/拍板/修订计划时使用。
+description: 为 Claude Code Ultracode 编写和恢复开发 Workflow：复用 OpenSpec、按依赖并行实现、里程碑审查与证据验收。用户用 workflow 前缀提交开发需求，或要求编写、执行、恢复 Workflow 时使用。
 ---
 
 # Workflow 经验库
 
-本 Skill 是 Claude Code 内置 `workflow-authoring` 的**增量经验层**。若尚未加载 `workflow-authoring`，先调用它；已加载则不要重复。语法/runtime 冲突时以 `workflow-authoring` 为准，只有本库明确标注的本机实测差异例外。
+这是内置 `workflow-authoring` 的增量层；未加载时先调用，已加载不重复。原生 DSL/schema/args/resume 契约以它为准。本页负责选链与执行边界；仅在触发对应情况时读 reference，不预读整套资料。
 
-**原生 contract 不在这里复述**：`meta`、Workflow DSL/primitives、schema 基础规则、args、determinism、nullable result、pipeline/parallel、checkpoint 等直接查 `workflow-authoring`。本文件只保留本机路由、模型映射、缓存实测和降低返工/强模型成本的经验。
+## 先恢复，再选链
 
-其余内容 **按需 Read `references/`**，不要预读。
+先核对当前 repo/worktree、任务和 OpenSpec change。启动/等待时遵守 [任务身份](references/task-identity.md)：args 必须是对象，显式填写 changeDir/task/milestone，记录 taskId/runId/scriptPath；running、idle、消息通知都不代表完成。
 
-> 语料：本机 workflow 运行记录 + GitNexus/OpenSpec 实战。标「LDL_UGC 专有」者跨项目不适用。
+有 checkpoint 候选时先核实任务身份及脚本/源码指纹；匹配且有效才复用。原生恢复用原脚本与 resumeFromRunId，args 是首轮完整参数叠加新值；decisions/modelEfforts/phaseEfforts 按 key 合并。dirty、legacy、来源缺失不能直接命中；恢复时读 [resume-and-args](references/resume-and-args.md)。脚本异常或实现部分落盘时先查 git diff，按 [失败恢复](references/review-repair.md) 只补失败部分，不盲目重放 Implement。
 
-## 意图路由（先探测 OpenSpec，再选链）
-
-模板名是内部细节，对用户不报文件名。
-
-**开发任务默认先探测是否已有匹配的 OpenSpec change。** 已有 `proposal/specs/design/tasks`（以及项目自定义 `plan.md`）时，它们是持久化 Plan IR；不要再从零造一份平行 Full Plan。
-
-| 项目/用户意图 | 选链（复制模板） |
+| 当前需求 | 模板（复制并配置） |
 |---|---|
-| 已有 OpenSpec change，执行/修 bug/功能改动 | OpenSpec→Recon/Drift→BasePlan Overlay→DecisionApply→Review/Patch→SpecSync→Implement→Verify：`openspec-incremental.js` |
-| 无 OpenSpec，修 bug / 功能改动 | Recon→评分→Plan→Review→Implement→Verify：`gitnexus-routed.js` |
-| 只调研不改码 | 只读 Recon→Synthesize：`readonly-recon.js` |
-| OpenSpec 多里程碑且强调人工拍板边界 | 一里程碑一 workflow：`stage-with-gates.js`；新脚本优先吸收 `openspec-first.md` 的 DecisionApply 规则 |
+| 已有匹配 OpenSpec change，执行/修复任务 | `../../templates/openspec-incremental.js` |
+| 无匹配 OpenSpec，修 bug/功能改动 | `../../templates/gitnexus-routed.js` |
+| 纯调研 | `../../templates/readonly-recon.js` |
+| 需要在阶段间由用户拍板 | 按决议边界分 Workflow，参考 `../../templates/stage-with-gates.js` |
 
-**OpenSpec-first 细则**：Read `references/openspec-first.md`。关键点：
-- OpenSpec artifacts 是长期 Plan IR；BasePlan 只产 execution overlay / delta；
-- `args.decisions` **不得进入 BasePlan prompt**；普通 DecisionApply 优先 JS 0 token；
-- 逻辑别名 `sonnet` 负责机械/局部 PlanPatch 与 SpecSync；
-- **上一版是谁写的不决定下一版用谁**：只有本轮出现新增架构推理才回 Opus；
-- Review 局部问题直接 revisedPlan + 独立复审；复杂问题提案/质疑/汇总，详见 references/review-repair.md。
+OpenSpec 的 proposal/specs/design/tasks（及项目 plan.md）是持久计划；只生成执行 overlay，不再重写 Full Plan。用户 decisions 不进入 BasePlan prompt；普通选择用 JS 应用。只有新增架构/公共契约/状态所有权等设计推理才升级规划角色，机械修订仍用常规角色。涉及 DecisionApply/PlanPatch/SpecSync 时读 [OpenSpec-first](references/openspec-first.md)。
 
-**早退续跑**（详见 `references/resume-and-args.md`）：
-- 通用 `gitnexus-routed.js`：`route-escalation-required` / `replan-required` 同 session 用 `resumeFromRunId` + 首轮 args 全量叠加 `nextArgs`；
-- OpenSpec-first 用户拍板：同 session resume + `args.decisions`；BasePlan prompt 不含 decisions，因此 BasePlan 应命中；普通选择由 JS Apply，架构选择才跑 Opus PlanDelta；
-- `need-decision` 跨 session：Git 中最新 OpenSpec artifacts 是第一 planning checkpoint，再辅以 `docs/ultracode/raw/` 与 `.claude/progress/*.jsonl`。
+## 并行与 Review
 
-**持久语义缓存 v0.4.3**：hook 注入 `[Ultracode checkpoint resolver]` 先判候选：`nativeResume=true` 用原 `scriptPath+resumeFromRunId`+`resumeArgs` 全量；`valid=true` → 传 `priorState/checkpointKey/checkpointValidation` 走 ARTIFACT HIT；`dirty`/`legacy`/`sourceKind=none` 禁直接 hit，先 haiku CheckpointValidate；`valid=false` 禁复用。harvest 按四字段指纹续收 resume 终态，raw 版本化 .rN；gitnexus 链 decisions 已移出 Plan prompt（JS DecisionApply）。
+同一需求优先一个 Workflow：共享 Recon/Plan，脚本按依赖调度独立实现切片，最后统一 Verify。两条开发模板默认 `parallelMode=auto`、`maxParallel=2`；旧计划或证据不足自动串行。新计划为切片填写 execution（依赖、文件读取、共享资源、验收）；有可并行切片时读 [并行执行](references/parallel-execution.md)。不能只按前端/后端名称推断独立性，也不为小任务增加 Agent。
 
-## 索引（按需 Read）
+独立交付单元可由外层启动多个 Workflow；各自使用稳定 workflowSliceId、独立工作区/文件归属和 checkpoint。外层分配总并发预算，不能每个 Workflow 都用满预算；同一 tasks.md、共享生成目录、集成验证与提交只由一个收口者处理。跨 Workflow 锁与自动合并尚未实现，边界不清时用一个 Workflow。
 
-| 需要什么 | Read |
-|---|---|
-| OpenSpec-first / DecisionApply / PlanPatch / SpecSync | `references/openspec-first.md` ★ |
-| resume / 两级暂停 / 跨 session artifact cache | `references/resume-and-args.md` + ADR-007 ★ |
-| 本机取证型 schema 实例 | `references/schemas.md` |
-| prompt 开场白语料 | `references/prompt-openers.md` |
-| 高频约束句式与命中率 | `references/constraints.md` |
-| GitNexus 前置/后置检查 | `references/gitnexus-block.md` |
-| 模型别名与 effort 本机实测 | `references/model-effort.md` |
-| GitNexus 动态路由 | `references/dynamic-routing.md` |
-| Codex CLI 可选覆盖 | `references/codex-cli.md` |
-| 多会话定向回传 / 主会话 handoff | `references/peer-handoff.md` ★ |
-| Codex ↔ Claude Code CLI 通信（暂时停用） | `references/session-bridge.md` |
-| 踩坑记忆 | `references/pitfalls.md` |
-| 可粘贴脚本 | `../../templates/` |
+**OpenSpec 默认 `reviewTiming=milestone`：普通切片和局部 Repair 不做计划 Review，里程碑完成后一次独立 Review（Audit 阶段）。** Verify 每次保留。Recon 与 Verify 核对整个里程碑 task 全集和完成证据；未完成标 pending，证据不足标 unconfirmed，不能将当前切片完成冒充里程碑完成。设计缺失/漂移、新增需求或架构语义、关键未知项才提前审计划；实际影响超计划触发例外 Audit。具体见 [里程碑审查](references/milestone-review.md)。
 
-## 本机模型分工
+无 OpenSpec 保留风险驱动 `reviewMode=auto`；`reviewTiming=plan` 可恢复 OpenSpec 原策略，`reviewMode=always` 显式全审。跳过必须标 skipped，不能伪造 approve。Implement/Repair 遇到有证据的疑难才请求 fable/opus 顾问，每 run 共享默认 3 次预算；普通编译/格式错误自行解决。详见 [动态路由](references/dynamic-routing.md)。
 
-| Phase | model | effort | 职责 |
-|---|---|---|---|
-| Recon | `haiku` | — | OpenSpec/GitNexus/代码事实、drift、爆炸半径 |
-| BasePlan（OpenSpec 已覆盖设计） | `sonnet` | `high` | execution overlay / task→slice 映射 |
-| BasePlan / PlanDelta（新增架构推理） | `opus` | `high` | 架构、public contract、状态所有权等 |
-| DecisionApply | JS | — | 应用 Planner 预编码的用户选择；默认 0 token |
-| PlanPatch（mechanical/slice） | `sonnet` | `high` | 修局部 slice / whitelist / tests / task 映射 |
-| Review / DeltaReview | `fable` | `high` | 独立审阅并返回局部修订计划，不写业务代码 |
-| SpecSync | `sonnet` | `high` | 把已批准 delta 写回 OpenSpec，不重新设计 |
-| Preflight | `haiku` | — | 装依赖、建目录、跑基线 |
-| Implement | `sonnet` / `opus` | `xhigh` | 路由派生；CRITICAL 默认 Opus |
-| Verify / Commit | `haiku` | — | 测试、GitNexus 实测、证据后勾 task、提交 |
+## 主 Agent 与 Token
 
-**模型连续性不是路由依据。** 即使上一版 Plan 使用 `opus`，只要后续只是应用已结构化决策、补 whitelist/test、修改单个 slice 或把批准结果同步进 Markdown，仍用 JS/`sonnet`。只有本轮需要新的架构推理才回 `opus`。
+Astra low 适合按明确规则选链、填参、派发、检查结果；medium 适合依赖拆分、契约边界和重规划。这是分工建议，不自动修改用户模型/effort。保留逻辑别名及用户覆盖；参考 [模型与 effort](references/model-effort.md)。
 
-**Opus 门**：新增/改变 architecture boundary、public API/schema、cross-repo contract、concurrency/lifecycle/state-machine ownership、persistence/migration/security 语义，或 Reviewer 用证据推翻原架构假设。单纯高 blast radius 但 OpenSpec design 已完整覆盖，不自动要求 Opus 重写 Plan；高风险仍由 Review/Verify/Audit 兜底。
+复用已核实模板，仅修改必要参数/任务差异，避免整段重写。每个实现 Agent 只收到本切片、相关契约、前置结果与验收；完整日志留 artifact，返回状态/证据位置/阻塞即可。调度、冲突检查、计数用 JS；已经通过且未变化的检查不重复跑。并行主要节约耗时，总 Token/费用须用相同任务实测，不能按 Agent 数或文档长度推算。
 
-**effort 本机差异**：`haiku+max` 可能被吞、`sonnet+xhigh` 降级；以退出码/测试计数为准，不唯 effort。
+## 执行边界
 
-**用户 effort 覆盖（v0.5.0）**：把逻辑模型覆盖放入 `args.modelEfforts`，把阶段/角色覆盖放入 `args.phaseEfforts`；允许 `low/medium/high/xhigh/max/null`。阶段或角色优先于逻辑模型，`null` 恢复调用点默认，未指定项保持旧行为。`Review`、`Advisor`、`Audit` 可独立设置。恢复时两张 map 都按 key 合并；提高 Plan/Recon effort 会使对应语义 artifact 失效，提高 Review effort 只重审而不无故重做未变 BasePlan。wrapper 日志中的 requested 只是请求值，实际上游模型/effort 无证据时为 unknown。
+- 每次 LLM 调用经过统一 wrapper，保留调用点已有 disallowedTools 并禁用 SendMessage/ListAgents；并行叶子还禁用 Agent/Task/Workflow，避免嵌套扩大预算。
+- repo/worktree 与 gitnexusRepo 分开传；生成脚本先经 PreToolUse 静态预检。改 symbol 前做 GitNexus impact；HIGH/CRITICAL 报风险，UNKNOWN/partial/truncated 不当作无影响。
+- Verify 必须有真实命令/退出码及完成证据；缺失结果不报完成。requireCommit 默认 false，用户授权才开启；不可顺带 push/deploy/写数据库。
+- Bridge 暂停，不建立 request、不接 Channel、不回传 Bridge。其他跨会话动作仅按用户显式指令由外层执行，参考 [peer-handoff](references/peer-handoff.md)；不得从历史通知推断新授权，也不能借另一会话执行被拒操作。
 
-**effort 失败规则**：wrapper 不自动降级或换模型；只有 runtime/provider 给出明确 capability 错误并且用户已授权相应策略时才调整。`null`、超时、schema、鉴权、限流或网络错误都不是能力证据。详见 `references/model-effort.md`。
-
-**Haiku 上下文恢复 v0.4.5**：普通 null 不换模型。Stop/harvest 仅在失败 Haiku 代理有明确上下文/压缩错误时续起一次；优先原 scriptPath + resumeFromRunId，只将失败阶段模型改 sonnet。先核实已有副作用，禁止重放；同终态去重，再失败如实停止。细则见 `references/model-effort.md`。
-
-**动态路由**见 `references/dynamic-routing.md`。**Codex 覆盖默认关闭**：Review/Audit 仍是 `fable`；只有用户明确要求时，authoring 阶段才按 `references/codex-cli.md` 改写本次 workflow。
-
-## 按需 Review / advisor（Implement 疑难点）
-
-两条主链默认 `reviewMode=auto`，JS 综合 Planner 难度与 Recon 风险：低/中难度、低风险可跳过，高风险/不确定性强制审查；`always` 全审，skipped 不等于 approve。
-
-Implement/Repair 可按需请求顾问，Agent 选 `advisorTier=fable/opus`；共享 3 次预算，顾问只建议，最终独立 Audit。配置见 `references/dynamic-routing.md`。
-
-OpenSpec-first 若实现阶段发现 **Plan 本身**失效，优先分类 mechanical/slice/architecture：局部问题回 PlanPatch；架构假设失效回 Opus PlanDelta；实现者不得私改 requirement/design。
-
-## 决议与跨会话
-
-不要把整个 Stage 合并成一个长 workflow。以**决议边界**切分；同 session 优先 Runtime Resume，否则走 state JSON Artifact Restore（legacy 先廉价验证），缺失/失效才退回 Git OpenSpec + raw harvest 普通 Checkpoint。
-
-OpenSpec 项目中，OpenSpec artifact 是第一 planning source of truth；harvest 的 LLM result 是辅助证据。若两者冲突，必须重新验证 workspace/drift，不得凭历史摘要覆盖 Git 中已更新的 artifact。
-
-**统一 wrapper 硬门（v0.5.0）**：顶层 Workflow DSL 没有 `SendMessage` / `ListAgents` primitive，但 `agent()` 启动的子代理可能从其工具面获得二者；只写 prompt 禁令不足。所有成品模板与新写 workflow 的每次 LLM 调用都必须经过统一 wrapper，在 `opts.disallowedTools` 中合并 `SendMessage`、`ListAgents` 并保留调用点已有项；wrapper 同时解析 effort 覆盖并记录 requested/unknown 观测边界。上下文恢复由 Stop/harvest 的精确分类处理，不在 wrapper 中把普通 `null` 当作上下文错误。
-
-Workflow Bridge 已暂时停用，不建立 Bridge request、不接入 Channel、不通过 Bridge 回传。普通 Workflow 正常运行并在当前 Claude 会话交付结果。其他跨会话动作仍须用户显式授权；Claude peer 按 `references/peer-handoff.md`，不得作为停用 Bridge 的自动替代。内部只返回结果，不新增 LLM 通信 phase、不改 BasePlan/cache key。
-
-跨会话红线：绝不请求其他会话执行本会话被权限拒绝的操作；常态进度不发即时消息。默认安装不读取、不自动注入其他会话进度，`peer-progress.cjs` 只作为未注册的历史/手动工具保留。
-
-**v0.5.1**：两条开发主模板默认 requireCommit=false；脚本先静态预检，Verify 核对命令/退出码，失败有限 Repair。脚本异常先核实已有实现，再 recover-verify，禁止重放。细则 Read `references/review-repair.md`。
+其他按需参考：[schema](references/schemas.md)、[GitNexus](references/gitnexus-block.md)、[约束句式](references/constraints.md)、[prompt](references/prompt-openers.md)、[踩坑](references/pitfalls.md)。仅用户指定 Codex CLI 覆盖阶段时读 [codex-cli](references/codex-cli.md)。
